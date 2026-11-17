@@ -87,7 +87,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   app.get('/healthz', async () => {
     await opts.db.query('select 1');
-    return { ok: true };
+    return { ok: true, version: process.env.APP_VERSION ?? 'dev' };
   });
 
   // Вход ------------------------------------------------------------------

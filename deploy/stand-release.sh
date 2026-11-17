@@ -19,7 +19,7 @@ free_mb=$(df -Pm / | awk 'NR==2 {print $4}')
 "$SRC/deploy/server/install.sh"
 
 echo "[stand-release] сборка образа truedata-kam:$VERSION"
-docker build -q -t "truedata-kam:$VERSION" "$SRC" >/dev/null
+docker build -q --build-arg APP_VERSION="$VERSION" -t "truedata-kam:$VERSION" "$SRC" >/dev/null
 
 /usr/local/bin/kam-deploy local "$VERSION"
 

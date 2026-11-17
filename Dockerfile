@@ -15,7 +15,8 @@ RUN cd web && npm run build
 FROM node:22-bookworm-slim
 LABEL org.opencontainers.image.source=https://github.com/truedata1c-hub/truedata-kam
 LABEL org.opencontainers.image.description="PharmaCheck · Переговоры"
-ENV NODE_ENV=production
+ARG APP_VERSION=dev
+ENV NODE_ENV=production APP_VERSION=$APP_VERSION
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
