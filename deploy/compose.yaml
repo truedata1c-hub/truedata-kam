@@ -44,6 +44,9 @@ services:
       # Демо-платформа стенда: закрытый ключ демо-платформы и пароль страницы /demo-platform.
       SSO_DEMO_PRIVATE_KEY: ${SSO_DEMO_PRIVATE_KEY:-}
       DEMO_PLATFORM_PASSWORD: ${DEMO_PLATFORM_PASSWORD:-}
+      # Демо-набор пересоздаётся при выпуске, если в версии модуля он изменился.
+      KAM_DEMO_PASSWORD: ${KAM_DEMO_PASSWORD:-}
+      DEMO_AUTO_UPGRADE: ${DEMO_AUTO_UPGRADE:-1}
     volumes:
       - type: bind
         source: ${KAM_DATA_DIR:-/srv/truedata-mdm/kam}/files

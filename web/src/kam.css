@@ -47,11 +47,12 @@ button.kpi:hover { background: var(--hover); }
 .steps.halted .step.current { background: var(--red-soft); color: var(--red); }
 .steps.halted .step.current .num { background: var(--red); border-color: var(--red); }
 
+.twoCol > * { min-width: 0; }
 .twoCol { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; margin-top: 12px; align-items: start; }
 .panelHead { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; }
 .panelTitle { font-size: 13px; line-height: 18px; font-weight: 600; color: var(--ink); }
 .panelBody { padding: 0 14px 14px; }
-.stack { display: grid; gap: 12px; }
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; }
 
 .placeholder { border: 1px dashed var(--control); border-radius: 8px; padding: 18px; color: var(--muted); display: flex; gap: 12px; align-items: flex-start; background: #fcfcfd; }
 
@@ -110,3 +111,10 @@ button.kpi:hover { background: var(--hover); }
   .headActions { margin-left: 0; justify-content: flex-start; }
 }
 .cellSub.clip { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tdTabs.small button { height: 26px; padding: 0 9px; font-size: 11.5px; }
+.banner.warn { background: #fffaeb; color: #93370d; border-color: #fedf89; }
+.miniTable .num, .miniTable th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.miniTable tr.current td { background: var(--purple-soft); }
+.kpiValue .muted { font-size: 12px; }
+a.tdBtn { text-decoration: none; }

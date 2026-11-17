@@ -13,7 +13,8 @@ export interface Reference {
   assignable: { id: string; name: string; network_ids: string[] }[];
 }
 
-export type Page = 'portfolio' | 'campaign' | 'decisions' | 'analytics' | 'users' | 'roles' | 'networks' | 'brands' | 'types' | 'audit';
+export type Page = 'portfolio' | 'campaign' | 'decisions' | 'analytics' | 'users' | 'roles' | 'networks' | 'brands' | 'types' | 'prior' | 'settings' | 'audit';
+const ADMIN_PAGES = ['users', 'roles', 'networks', 'brands', 'types', 'prior', 'settings', 'audit'];
 
 const params = new URLSearchParams(location.search);
 export const embedded = params.get('embed') === '1';
@@ -50,12 +51,12 @@ export function readRoute() {
   const h = location.hash.replace(/^#\/?/, '');
   const [a, b] = h.split('/');
   if (a === 'campaign' && b) { state.page = 'campaign'; state.campaignId = b; return; }
-  if (a === 'admin' && b && ['users', 'roles', 'networks', 'brands', 'types', 'audit'].includes(b)) { state.page = b as Page; return; }
+  if (a === 'admin' && b && ADMIN_PAGES.includes(b)) { state.page = b as Page; return; }
   if (a === 'decisions' || a === 'analytics') { state.page = a; return; }
   state.page = 'portfolio';
 }
 export function go(page: Page, id?: string) {
-  const hash = page === 'campaign' ? `#/campaign/${id}` : ['users', 'roles', 'networks', 'brands', 'types', 'audit'].includes(page) ? `#/admin/${page}` : `#/${page}`;
+  const hash = page === 'campaign' ? `#/campaign/${id}` : ADMIN_PAGES.includes(page) ? `#/admin/${page}` : `#/${page}`;
   if (location.hash !== hash) location.hash = hash;
   else readRoute();
 }

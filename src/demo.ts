@@ -6,8 +6,14 @@ import { randomUUID } from 'node:crypto';
 import type { Db, Tx } from './db.js';
 import { withTx } from './db.js';
 import { hashPassword } from './auth.js';
+import { periodsFor, type Split } from './periods.js';
+import { versionTemplate } from './excel.js';
+import { filesDir, mimeOf, storeBuffer } from './files.js';
+import { writeSetting } from './settings.js';
 
 export const DEMO_CODE = 'DEMO';
+/** Версия демо-набора: при её росте стенд пересоздаёт набор при запуске (DEMO_AUTO_UPGRADE). */
+export const DEMO_VERSION = 2;
 
 function rng(seed: number) {
   return () => {
@@ -92,7 +98,7 @@ const TYPES = [
 
 const ORDER = ['PREPARATION', 'NEGOTIATION', 'APPROVAL', 'APPROVED', 'CONFIRMED', 'FINAL', 'CLOSED'];
 
-export async function seedDemo(db: Db, opts: { password: string; domain?: string; reset?: boolean; today?: string }): Promise<{ clientId: string; users: number; campaigns: number }> {
+export async function seedDemo(db: Db, opts: { password: string; domain?: string; reset?: boolean; today?: string; filesDir?: string }): Promise<{ clientId: string; users: number; campaigns: number }> {
   const domain = opts.domain ?? 'demo.truedata.tech';
   const r = rng(20271117);
   const pick = <T>(a: readonly T[]) => a[Math.floor(r() * a.length)]!;
@@ -178,6 +184,7 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
     let number = 0;
     let campaigns = 0;
     const headOf = (kam: string) => USERS.find((u) => u.email === kam)!.manager!;
+    const made: { id: string; net: (typeof nets)[number]; type: string; from: string; to: string; stage: string; owner: string; times: Date[] }[] = [];
     const insertCampaign = async (o: { net: (typeof nets)[number]; type: keyof typeof typeIds; title: string; from: string; to: string; control: string; stage: string; created: string; cancel?: string }) => {
       const id = randomUUID();
       number += 1;
@@ -207,6 +214,7 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
         await ev('STAGE', times[i]!, actor, steps[i - 1]!, to, to === 'APPROVED' ? 'Согласовано в демо-наборе.' : null);
       }
       if (o.stage === 'CANCELLED') await ev('STAGE', stageAt, owner, 'NEGOTIATION', 'CANCELLED', o.cancel ?? null);
+      made.push({ id, net: o.net, type: o.type, from: o.from, to: o.to, stage: o.stage, owner, times: o.stage === 'CANCELLED' ? [...times, stageAt] : times });
     };
 
     // Годовые условия 2027: основной поток переговоров в ноябре.
@@ -244,6 +252,8 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
         stage: isAssort ? pick(['PREPARATION', 'NEGOTIATION', 'APPROVAL']) : pick(['FINAL', 'CONFIRMED', 'CLOSED']), created: day(-Math.floor(10 + r() * 70)) });
     }
     await tx.query('insert into kam.campaign_counter(client_id, last_no) values ($1,$2)', [clientId, number]);
+    await seedVersions(tx, { clientId, nets, made, brandIds, userIds, typeSplit: Object.fromEntries(TYPES.map((t) => [t.key, t.split])), filesDir: opts.filesDir ?? filesDir() });
+    await writeSetting(tx, clientId, 'demo_version', DEMO_VERSION);
     return { clientId, users: USERS.length, campaigns };
   });
 }
@@ -251,9 +261,139 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
 /** Полностью удаляет данные клиента (только для пересоздания демо-набора). Журнал обычно неизменяем — триггер временно отключается. */
 async function purgeClient(tx: Tx, clientId: string) {
   await tx.query('alter table kam.audit_event disable trigger audit_event_no_update');
-  for (const t of ['campaign_event', 'campaign_legal_entity', 'campaign', 'campaign_counter', 'kam_assignment', 'legal_entity', 'network', 'network_group',
+  await tx.query("select set_config('kam.purge', 'on', true)");
+  for (const t of ['offer_version_document', 'offer_version_brand_note', 'offer_version_cell', 'offer_version', 'document', 'prior_period', 'client_setting', 'campaign_event', 'campaign_legal_entity', 'campaign', 'campaign_counter', 'kam_assignment', 'legal_entity', 'network', 'network_group',
     'user_brand', 'brand', 'user_manager', 'user_business_role', 'business_role', 'campaign_type', 'idempotency_request', 'audit_event', 'membership']) {
     await tx.query(`delete from kam.${t} where client_id = $1`, [clientId]);
   }
   await tx.query('alter table kam.audit_event enable trigger audit_event_no_update');
+}
+
+// Версии, прошлый период и документы демо-набора -----------------------------
+
+const JUSTIFY = [
+  'Рост инвестиций обеспечен расширением выкладки и участием сети в сезонной программе; ожидаемый оборот опирается на факт прошлого года.',
+  'Сеть открывает новые аптеки в регионе — планируем рост оборота при сохранении ставки. Инвестиции по брендам перераспределены в пользу лидеров продаж.',
+  'Условия сопоставимы с прошлым годом; увеличен бюджет на приоритетные бренды, по остальным — фиксированная ставка.',
+  'Сеть не выполнила план прошлого года по части брендов: снижаем ставку и вводим ступенчатую шкалу за выполнение.',
+];
+
+async function seedVersions(tx: Tx, o: {
+  clientId: string; nets: { id: string; name: string; kam: string }[];
+  made: { id: string; net: { id: string; name: string }; type: string; from: string; to: string; stage: string; owner: string; times: Date[] }[];
+  brandIds: Record<string, string>; userIds: Record<string, string>; typeSplit: Record<string, string>; filesDir: string;
+}) {
+  const r = rng(20261117);
+  const between = (a: number, b: number) => a + r() * (b - a);
+  const round = (v: number) => Math.round(v / 1000) * 1000;
+  const brandNames = Object.keys(o.brandIds);
+  // Прошлый период 2026: у каждой сети свой набор брендов и масштаб.
+  const portfolio = new Map<string, { brand: string; q: { planInv: number; factInv: number; planTurn: number; factTurn: number }[] }[]>();
+  for (const n of o.nets) {
+    const big = ['Ригла', 'АСНА', 'Аптеки 36,6', 'Магнит Аптека', 'Планета Здоровья', 'Апрель', 'Горздрав', 'Неофарм'].includes(n.name);
+    const count = big ? 5 + Math.floor(r() * 3) : 3 + Math.floor(r() * 3);
+    const brands = [...brandNames].sort(() => r() - 0.5).slice(0, count);
+    const rows = brands.map((brand) => {
+      const base = big ? between(0.9, 3.2) : between(0.25, 1.1);
+      const roiPlan = between(7, 14);
+      const execution = between(0.72, 1.12);
+      return {
+        brand,
+        q: [0.9, 1.05, 0.95, 1.1].map((season) => {
+          const planInv = round(base * season * 1e6);
+          const factInv = round(planInv * between(0.85, 1.08));
+          const planTurn = round(planInv * roiPlan);
+          return { planInv, factInv, planTurn, factTurn: round(planTurn * execution * between(0.95, 1.05)) };
+        }),
+      };
+    });
+    portfolio.set(n.id, rows);
+    for (const row of rows) {
+      for (const [i, q] of row.q.entries()) {
+        await tx.query(
+          `insert into kam.prior_period(client_id, network_id, brand_id, year, quarter, plan_investment, fact_investment, plan_turnover, fact_turnover, source)
+           values ($1,$2,$3,2026,$4,$5,$6,$7,$8,'DEMO')`, [o.clientId, n.id, o.brandIds[row.brand], i + 1, q.planInv, q.factInv, q.planTurn, q.factTurn]);
+      }
+    }
+  }
+
+  const brandList = brandNames.map((name) => ({ id: o.brandIds[name]!, name }));
+  for (const c of o.made) {
+    const split = o.typeSplit[c.type] as Split;
+    const periods = periodsFor(split, c.from, c.to);
+    const prior = portfolio.get(c.net.id) ?? [];
+    let count = 0;
+    if (c.type === 'annual' && c.from.startsWith('2026')) count = 1;
+    else if (c.stage === 'PREPARATION') count = r() < 0.3 ? 1 : 0;
+    else if (c.stage === 'NEGOTIATION' || c.stage === 'CANCELLED') count = 1 + Math.floor(r() * 3);
+    else count = 2 + Math.floor(r() * 2);
+    if (!count) continue;
+    // Основа версии: факт прошлого года с ростом; разовые акции — 1–2 бренда помесячно.
+    const brands = c.type === 'annual' ? prior : prior.sort(() => r() - 0.5).slice(0, c.type === 'promo' ? 1 + Math.floor(r() * 2) : 2 + Math.floor(r() * 2));
+    const growth = new Map(brands.map((b) => [b.brand, between(0.95, 1.3)]));
+    const roiShift = new Map(brands.map((b) => [b.brand, between(0.88, 1.08)]));
+    const stamp = (i: number) => {
+      const t = c.times;
+      const a = t[0]!.getTime();
+      const b = (t[Math.min(t.length - 1, 2)] ?? t[0]!).getTime();
+      return new Date(a + ((b - a) * (i + 1)) / (count + 1) + 3600_000);
+    };
+    for (let v = 1; v <= count; v++) {
+      const step = 1 + (v - count) * 0.04; // ранние версии чуть скромнее, последняя — итоговая
+      const cells: { brand_id: string; period_key: string; investment: number; turnover: number }[] = [];
+      for (const b of brands) {
+        const factYear = b.q.reduce((a, q) => a + q.factInv, 0);
+        const roiFact = b.q.reduce((a, q) => a + q.factTurn, 0) / Math.max(1, factYear);
+        for (const p of periods) {
+          let inv: number;
+          if (c.type === 'annual' && c.from.startsWith('2026')) {
+            const q = b.q[Number(p.key.slice(6)) - 1]!;
+            cells.push({ brand_id: o.brandIds[b.brand]!, period_key: p.key, investment: q.planInv, turnover: q.planTurn });
+            continue;
+          }
+          if (split === 'QUARTER' && c.type === 'annual') inv = b.q[Number(p.key.slice(6)) - 1]!.factInv * growth.get(b.brand)! * step;
+          else if (split === 'QUARTER') inv = (factYear / 4) * between(0.3, 0.6) * step;
+          else inv = (factYear / 12) * between(0.15, 0.35) * step;
+          const investment = round(inv);
+          cells.push({ brand_id: o.brandIds[b.brand]!, period_key: p.key, investment, turnover: round(investment * roiFact * roiShift.get(b.brand)!) });
+        }
+      }
+      if (!cells.length) continue;
+      const id = randomUUID();
+      const at = stamp(v - 1);
+      const totalInv = cells.reduce((a, x) => a + x.investment, 0);
+      const totalTurn = cells.reduce((a, x) => a + x.turnover, 0);
+      await tx.query(
+        `insert into kam.offer_version(client_id, id, campaign_id, number, periods, total_investment, total_turnover, justification, comment, created_by, created_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [o.clientId, id, c.id, v, JSON.stringify(periods), totalInv, totalTurn, v === count ? JUSTIFY[Math.floor(r() * JUSTIFY.length)]! : '',
+          v === 1 ? 'Первое предложение сети.' : 'Учтены комментарии сети.', c.owner, at]);
+      await tx.query(
+        `insert into kam.offer_version_cell(client_id, version_id, brand_id, period_key, investment, turnover)
+         select $1, $2, x.brand_id, x.period_key, x.investment, x.turnover from jsonb_to_recordset($3::jsonb) as x(brand_id uuid, period_key text, investment numeric, turnover numeric)`,
+        [o.clientId, id, JSON.stringify(cells)]);
+      // Файл предложения версии — в том же шаблоне, что скачивает КАМ.
+      const fileName = `${c.net.name} — условия, версия ${v}.xlsx`;
+      const buf = await versionTemplate({ title: `${c.net.name}: предложение, версия ${v}`, periods, brands: brandList.filter((b) => cells.some((x) => x.brand_id === b.id)), cells });
+      const stored = await storeBuffer(o.filesDir, o.clientId, buf);
+      const docId = randomUUID();
+      await tx.query(
+        `insert into kam.document(client_id, id, campaign_id, kind, file_name, mime, size_bytes, sha256, stage, uploaded_by, uploaded_at)
+         values ($1,$2,$3,'OUR_OFFER',$4,$5,$6,$7,'NEGOTIATION',$8,$9)`,
+        [o.clientId, docId, c.id, fileName, mimeOf(fileName), stored.size, stored.sha256, c.owner, at]);
+      await tx.query('insert into kam.offer_version_document(client_id, version_id, document_id) values ($1,$2,$3)', [o.clientId, id, docId]);
+      await tx.query(
+        `insert into kam.campaign_event(client_id, id, campaign_id, kind, comment, payload, actor, at) values ($1,$2,$3,'VERSION_CREATED',$4,$5,$6,$7)`,
+        [o.clientId, randomUUID(), c.id, v === 1 ? 'Первое предложение сети.' : 'Учтены комментарии сети.', JSON.stringify({ number: v, total_investment: totalInv, total_turnover: totalTurn }), c.owner, at]);
+    }
+  }
+}
+
+/** Пересоздаёт демо-набор, если сохранённая версия набора устарела. Пароль демо-пользователей не меняется. */
+export async function upgradeDemo(db: Db, password: string, domain?: string): Promise<boolean> {
+  const c = (await db.query<{ id: string; v: number | null }>(
+    `select c.id, (s.settings->>'demo_version')::int v from kam.client c left join kam.client_setting s on s.client_id = c.id where c.code=$1`, [DEMO_CODE])).rows[0];
+  if (!c || (c.v ?? 1) >= DEMO_VERSION) return false;
+  await seedDemo(db, { password, reset: true, domain });
+  return true;
 }

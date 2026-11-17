@@ -122,6 +122,8 @@ import NetworksPage from './pages/NetworksPage.vue';
 import BrandsPage from './pages/BrandsPage.vue';
 import TypesPage from './pages/TypesPage.vue';
 import AuditPage from './pages/AuditPage.vue';
+import PriorPage from './pages/PriorPage.vue';
+import SettingsPage from './pages/SettingsPage.vue';
 import PasswordDialog from './components/PasswordDialog.vue';
 import Icon from './components/Icon.vue';
 import TdSelect from './components/TdSelect.vue';
@@ -144,7 +146,9 @@ const adminNav: { page: Page; label: string; icon: string }[] = [
   { page: 'networks', label: 'Сети и юрлица', icon: 'building-07' },
   { page: 'brands', label: 'Бренды', icon: 'tag-01' },
   { page: 'types', label: 'Типы кампаний', icon: 'calendar' },
-  { page: 'audit', label: 'Журнал изменений', icon: 'clock-rewind' },
+  { page: 'prior', label: 'Прошлые периоды', icon: 'clock-rewind' },
+  { page: 'settings', label: 'Настройки', icon: 'grid-01' },
+  { page: 'audit', label: 'Журнал изменений', icon: 'file-05' },
 ];
 const adminPage = computed(() => adminNav.some((a) => a.page === state.page));
 const adminTitle = computed(() => adminNav.find((a) => a.page === state.page)?.label ?? '');
@@ -162,7 +166,7 @@ const PageBody = defineComponent({
     return () => {
       if (!company.value) return h('div', { class: 'panel emptyState' }, 'У вашей учётной записи нет доступа ни к одной компании. Обратитесь к администратору.');
       const key = `${state.companyId}:${state.page}:${state.campaignId ?? ''}`;
-      const map: Partial<Record<Page, unknown>> = { portfolio: PortfolioPage, campaign: CampaignPage, users: UsersPage, roles: RolesPage, networks: NetworksPage, brands: BrandsPage, types: TypesPage, audit: AuditPage };
+      const map: Partial<Record<Page, unknown>> = { portfolio: PortfolioPage, campaign: CampaignPage, users: UsersPage, roles: RolesPage, networks: NetworksPage, brands: BrandsPage, types: TypesPage, prior: PriorPage, settings: SettingsPage, audit: AuditPage };
       const comp = map[state.page] ?? PortfolioPage;
       if (adminPage.value && !isAdmin.value) return h('div', { class: 'panel emptyState' }, 'Раздел доступен администратору.');
       return h(comp as any, { key, ...(state.page === 'campaign' ? { id: state.campaignId } : {}) });

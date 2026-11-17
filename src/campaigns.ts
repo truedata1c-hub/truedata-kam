@@ -64,8 +64,11 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
             n.id network_id, n.name network_name, n.regions network_regions,
             t.id type_id, t.name type_name,
             u.id owner_id, u.display_name owner_name,
-            (select count(*)::int from kam.campaign_legal_entity e where e.client_id = c.client_id and e.campaign_id = c.id) legal_entities
+            (select count(*)::int from kam.campaign_legal_entity e where e.client_id = c.client_id and e.campaign_id = c.id) legal_entities,
+            v.number version, v.total_investment::float8 investment, v.total_turnover::float8 turnover
        from kam.campaign c
+       left join lateral (select number, total_investment, total_turnover from kam.offer_version ov
+                           where ov.client_id = c.client_id and ov.campaign_id = c.id order by number desc limit 1) v on true
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
        join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
        join kam.app_user u on u.id = c.owner_id
@@ -81,10 +84,14 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
   let overdue = 0;
   for (const r of stageRows) { byStage[r.stage] = r.n; overdue += r.overdue; }
   const active = STAGES.filter((s) => s !== 'CANCELLED' && s !== 'CLOSED').reduce((a, s) => a + byStage[s], 0);
+  // Суммы — по текущим версиям показанных кампаний, без отменённых.
+  const counted = rows.filter((r) => r.stage !== 'CANCELLED' && r.version);
+  const investment = Math.round(counted.reduce((a, r) => a + r.investment, 0) * 100) / 100;
+  const turnover = Math.round(counted.reduce((a, r) => a + r.turnover, 0) * 100) / 100;
   return {
-    items: rows,
+    items: rows.map((r) => ({ ...r, roi: r.investment > 0 ? Math.round((r.turnover / r.investment) * 100) / 100 : null })),
     kpi: {
-      active, overdue,
+      active, overdue, investment, turnover, roi: investment > 0 ? Math.round((turnover / investment) * 100) / 100 : null, with_versions: counted.length,
       awaiting_decision: byStage.APPROVAL,
       approved: byStage.APPROVED + byStage.CONFIRMED + byStage.FINAL,
       by_stage: byStage,
@@ -117,6 +124,8 @@ function actionsFor(ctx: Ctx, c: { stage: Stage; owner_id: string }) {
   if (edit && c.stage === 'PREPARATION') a.push('START_NEGOTIATION');
   if (edit && CANCELLABLE.includes(c.stage)) a.push('CANCEL');
   if (edit && c.stage === 'FINAL') a.push('CLOSE');
+  if (edit && EDITABLE_STAGES.includes(c.stage)) a.push('NEW_VERSION');
+  if (edit && c.stage !== 'CANCELLED' && c.stage !== 'CLOSED') a.push('UPLOAD');
   return a;
 }
 

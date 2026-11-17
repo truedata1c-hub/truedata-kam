@@ -1,6 +1,7 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
 import cookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
+import multipart from '@fastify/multipart';
 import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import type { Db, Tx } from './db.js';
@@ -13,6 +14,12 @@ import { demoPlatform, type DemoPlatformConfig } from './demoPlatform.js';
 import * as campaigns from './campaigns.js';
 import * as admin from './admin.js';
 import { networkEntities, reference } from './reference.js';
+import * as versions from './versions.js';
+import * as documents from './documents.js';
+import * as prior from './prior.js';
+import * as settings from './settings.js';
+import { parseVersion, versionTemplate } from './excel.js';
+import { MAX_FILE_BYTES } from './files.js';
 
 export interface AppOptions {
   db: Db;
@@ -45,11 +52,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.addHook('onRoute', (r) => { for (const m of [r.method].flat()) routes.push({ method: m, url: r.url }); });
   app.decorate('kamRoutes', routes);
   await app.register(cookie);
+  await app.register(multipart, { limits: { fileSize: MAX_FILE_BYTES, files: 1 } });
   app.decorateRequest('principal', null);
 
   const frameAncestors = ["'self'", ...(opts.frameAncestors ?? [])].join(' ');
   app.addHook('onSend', async (_req, reply) => {
-    reply.header('Content-Security-Policy', `frame-ancestors ${frameAncestors}`);
+    // Файлы документов задают собственную, более строгую политику (documents.sendFile).
+    if (reply.getHeader('x-kam-file')) reply.removeHeader('x-kam-file');
+    else reply.header('Content-Security-Policy', `frame-ancestors ${frameAncestors}`);
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('Referrer-Policy', 'same-origin');
   });
@@ -193,6 +203,58 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   });
   app.patch(`${C}/campaigns/:id`, command((tx, ctx, req) => campaigns.updateCampaign(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
   app.post(`${C}/campaigns/:id/transitions`, command((tx, ctx, req) => campaigns.transition(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
+
+  // Версии предложения
+  app.get(`${C}/campaigns/:id/versions`, async (req) => ({ items: await versions.listVersions(await ctxOf(req), param(req, 'id')) }));
+  app.get(`${C}/campaigns/:id/versions/draft`, async (req) => versions.versionDraft(await ctxOf(req), param(req, 'id')));
+  app.get(`${C}/campaigns/:id/versions/template.xlsx`, async (req, reply) => {
+    const ctx = await ctxOf(req);
+    const d = await versions.versionDraft(ctx, param(req, 'id'));
+    const card = await campaigns.getCampaign(ctx, param(req, 'id'));
+    const brands = (await ctx.db.query<{ id: string; name: string }>('select id, name from kam.brand where client_id=$1 and not archived order by name', [ctx.clientId])).rows;
+    const buf = await versionTemplate({ title: `${card.data.network.name} — ${card.data.title}`, periods: d.periods, brands, cells: d.cells });
+    const name = `Разбивка ${card.data.network.name} ${card.data.title}.xlsx`.replace(/[\\/:*?"<>|]/g, ' ');
+    reply.header('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    reply.header('content-disposition', `attachment; filename="template.xlsx"; filename*=UTF-8''${encodeURIComponent(name)}`);
+    return reply.send(buf);
+  });
+  app.post(`${C}/campaigns/:id/versions/parse`, async (req) => {
+    const ctx = await ctxOf(req);
+    const d = await versions.versionDraft(ctx, param(req, 'id'));
+    if (!req.isMultipart()) throw new ApiError(415, 'MULTIPART_REQUIRED', 'Передайте файл формой multipart/form-data.');
+    const part = await req.file({ limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
+    if (!part) throw new ApiError(422, 'FIELD_REQUIRED', 'Выберите файл.', {}, 'file');
+    const buf = await part.toBuffer();
+    if (part.file.truncated) throw new ApiError(413, 'FILE_TOO_LARGE', 'Файл больше 5 МБ.', {}, 'file');
+    const brands = (await ctx.db.query<{ id: string; name: string }>('select id, name from kam.brand where client_id=$1 and not archived', [ctx.clientId])).rows;
+    return parseVersion(buf, d.periods, brands);
+  });
+  app.get(`${C}/campaigns/:id/versions/:number`, async (req) => versions.getVersion(await ctxOf(req), param(req, 'id'), param(req, 'number')));
+  app.post(`${C}/campaigns/:id/versions`, command((tx, ctx, req) => versions.createVersion(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
+
+  // Документы
+  app.get(`${C}/campaigns/:id/documents`, async (req) => {
+    const ctx = await ctxOf(req);
+    await campaigns.getCampaign(ctx, param(req, 'id'));
+    return { items: await documents.listDocuments(ctx, param(req, 'id')) };
+  });
+  app.post(`${C}/campaigns/:id/documents`, async (req, reply) => send(reply, await documents.upload(await ctxOf(req), param(req, 'id'), req)));
+  app.get(`${C}/campaigns/:id/documents/:docId/file`, async (req, reply) =>
+    documents.sendFile(await ctxOf(req), param(req, 'id'), param(req, 'docId'), (req.query as { inline?: string }).inline === '1', reply, frameAncestors));
+  app.post(`${C}/campaigns/:id/documents/:docId/archive`, command((tx, ctx, req) => documents.archive(tx, ctx, param(req, 'id'), param(req, 'docId'), body(req))));
+
+  // Прошлые периоды и настройки
+  app.get(`${C}/prior-periods`, async (req) => prior.summary(await ctxOf(req), (req.query as { year?: string }).year));
+  app.get(`${C}/prior-periods/template.xlsx`, async (req, reply) => {
+    const year = (req.query as { year?: string }).year;
+    const buf = await prior.template(await ctxOf(req), year);
+    reply.header('content-type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    reply.header('content-disposition', `attachment; filename="prior.xlsx"; filename*=UTF-8''${encodeURIComponent(`Прошлый период ${year}.xlsx`)}`);
+    return reply.send(buf);
+  });
+  app.post(`${C}/prior-periods/import`, async (req, reply) => send(reply, await prior.importFile(await ctxOf(req), req)));
+  app.get(`${C}/settings`, async (req) => settings.getSettings(await ctxOf(req)));
+  app.put(`${C}/settings/thresholds`, command((tx, ctx, req) => settings.saveThresholds(tx, ctx, body(req))));
 
   app.get(`${C}/roles`, async (req) => admin.listRoles(await ctxOf(req)));
   app.post(`${C}/roles`, command((tx, ctx, req) => admin.createRole(tx, ctx, body(req))));

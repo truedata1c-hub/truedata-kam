@@ -31,9 +31,14 @@
         <div class="kpiSub">условия не согласованы вовремя</div>
       </button>
       <div class="kpi">
-        <div class="kpiLabel">Инвестиции и оборот</div>
-        <div class="kpiValue muted" style="font-weight: 600; font-size: 13px; line-height: 26px">появятся с версиями</div>
-        <div class="kpiSub">разбивка по брендам и кварталам — шаг 2</div>
+        <div class="kpiLabel">План инвестиций</div>
+        <div class="kpiValue">{{ fmtShort(kpi.investment) }}</div>
+        <div class="kpiSub">по текущим версиям {{ kpi.with_versions }} {{ plural(kpi.with_versions, 'кампании', 'кампаний', 'кампаний') }}</div>
+      </div>
+      <div class="kpi">
+        <div class="kpiLabel">Ожидаемый оборот · ROI</div>
+        <div class="kpiValue">{{ fmtShort(kpi.turnover) }}</div>
+        <div class="kpiSub">ROI {{ fmtRoi(kpi.roi) }} — оборот на 1 ₽ инвестиций</div>
       </div>
     </div>
 
@@ -78,10 +83,19 @@
         </q-td>
       </template>
       <template #body-cell-period="p">
-        <q-td :props="p">{{ fmtPeriod(p.row.period_from, p.row.period_to) }}</q-td>
+        <q-td :props="p">{{ fmtDate(p.row.period_from) }}<div class="cellSub">по {{ fmtDate(p.row.period_to) }}</div></q-td>
       </template>
       <template #body-cell-stage="p">
         <q-td :props="p"><span class="pill" :class="STAGE_TONE[p.row.stage]">{{ STAGE_LABEL[p.row.stage] }}</span></q-td>
+      </template>
+      <template #body-cell-money="p">
+        <q-td :props="p" class="text-right">
+          <template v-if="p.row.version">
+            <div style="font-weight: 500">{{ fmtShort(p.row.investment) }}</div>
+            <div class="cellSub">{{ fmtShort(p.row.turnover) }} · ROI {{ fmtRoi(p.row.roi) }} · v{{ p.row.version }}</div>
+          </template>
+          <span v-else class="muted">нет версии</span>
+        </q-td>
       </template>
       <template #body-cell-control="p">
         <q-td :props="p">
@@ -106,16 +120,17 @@ import { computed, onMounted, reactive, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 import { api } from '../api';
 import { base, company, go, state, announceTitle } from '../store';
-import { STAGES, STAGE_LABEL, STAGE_TONE, campaignNo, fmtDate, fmtPeriod } from '../format';
+import { STAGES, STAGE_LABEL, STAGE_TONE, campaignNo, fmtDate, fmtRoi, fmtShort, plural } from '../format';
 import Icon from '../components/Icon.vue';
 import TdSelect from '../components/TdSelect.vue';
 import NewCampaignDialog from '../components/NewCampaignDialog.vue';
 
 interface Row {
+  version: number | null; investment: number | null; turnover: number | null; roi: number | null;
   id: string; number: number; title: string; stage: string; period_from: string; period_to: string; control_date: string; overdue: boolean; updated_at: string;
   network_name: string; network_regions: string[]; type_name: string; owner_name: string;
 }
-interface Kpi { active: number; overdue: number; awaiting_decision: number; approved: number; by_stage: Record<string, number> }
+interface Kpi { investment: number; turnover: number; roi: number | null; with_versions: number; active: number; overdue: number; awaiting_decision: number; approved: number; by_stage: Record<string, number> }
 
 const $q = useQuasar();
 const thisYear = new Date().getFullYear();
@@ -124,7 +139,7 @@ const defaultYear = new Date().getMonth() >= 9 ? thisYear + 1 : thisYear;
 const defaults = () => ({ q: '', year: String(defaultYear), stage: 'ACTIVE', type: null as string | null, network: null as string | null, owner: null as string | null, overdue: false });
 const filters = reactive(readFilters());
 const rows = ref<Row[]>([]);
-const kpi = ref<Kpi>({ active: 0, overdue: 0, awaiting_decision: 0, approved: 0, by_stage: {} });
+const kpi = ref<Kpi>({ investment: 0, turnover: 0, roi: null, with_versions: 0, active: 0, overdue: 0, awaiting_decision: 0, approved: 0, by_stage: {} });
 const loading = ref(false);
 const createDlg = ref(false);
 const pagination = ref({ rowsPerPage: 50, page: 1 });
@@ -132,7 +147,8 @@ const pagination = ref({ rowsPerPage: 50, page: 1 });
 const columns = [
   { name: 'network', label: 'Аптечная сеть', field: 'network_name', align: 'left' as const, sortable: true },
   { name: 'title', label: 'Кампания', field: 'title', align: 'left' as const, sortable: true },
-  { name: 'period', label: 'Период условий', field: 'period_from', align: 'left' as const, sortable: true },
+  { name: 'period', label: 'Период', field: 'period_from', align: 'left' as const, sortable: true },
+  { name: 'money', label: 'Инвестиции · оборот', field: 'investment', align: 'right' as const, sortable: true },
   { name: 'stage', label: 'Этап', field: (r: Row) => STAGES.indexOf(r.stage as never), align: 'left' as const, sortable: true },
   { name: 'control', label: 'Контрольная дата', field: 'control_date', align: 'left' as const, sortable: true },
   { name: 'owner', label: 'Ответственный', field: 'owner_name', align: 'left' as const, sortable: true },

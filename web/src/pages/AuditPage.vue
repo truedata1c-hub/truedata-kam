@@ -33,8 +33,8 @@ import { STAGE_LABEL, fmtTime } from '../format';
 import TdSelect from '../components/TdSelect.vue';
 
 interface Entry { id: string; entity_type: string; action: string; before: any; after: any; reason: string | null; recorded_at: string; actor_name: string }
-const ENTITY: Record<string, string> = { campaign: 'Кампания', role: 'Роль', user: 'Сотрудник', assignment: 'Закрепление за сетью', network: 'Сеть', network_group: 'Группа сетей', legal_entity: 'Юрлицо', brand: 'Бренд', campaign_type: 'Тип кампании' };
-const ACTION: Record<string, string> = { CREATE: 'создание', UPDATE: 'изменение', INVITE: 'добавление', RESET_PASSWORD: 'временный пароль', SET_MANAGER: 'назначен руководитель', END: 'открепление', START_NEGOTIATION: 'начало переговоров', CANCEL: 'отмена', CLOSE: 'закрытие' };
+const ENTITY: Record<string, string> = { campaign: 'Кампания', role: 'Роль', user: 'Сотрудник', assignment: 'Закрепление за сетью', network: 'Сеть', network_group: 'Группа сетей', legal_entity: 'Юрлицо', brand: 'Бренд', campaign_type: 'Тип кампании', version: 'Версия предложения', document: 'Документ', prior_period: 'Прошлый период', settings: 'Настройки' };
+const ACTION: Record<string, string> = { CREATE: 'создание', UPDATE: 'изменение', INVITE: 'добавление', RESET_PASSWORD: 'временный пароль', SET_MANAGER: 'назначен руководитель', END: 'открепление', START_NEGOTIATION: 'начало переговоров', CANCEL: 'отмена', CLOSE: 'закрытие', UPLOAD: 'загрузка', ARCHIVE: 'в архив', IMPORT: 'загрузка из Excel' };
 const typeOptions = Object.entries(ENTITY).map(([value, label]) => ({ value, label }));
 const rows = ref<Entry[]>([]);
 const type = ref<string | null>(null);
@@ -46,6 +46,9 @@ function summary(a: Entry): string {
   if (x.inn) return `ИНН ${x.inn}`;
   if (x.email) return x.email;
   if (x.stage) return STAGE_LABEL[x.stage] ?? x.stage;
+  if (x.file_name) return x.file_name;
+  if (x.number) return `v${x.number}`;
+  if (x.year) return `${x.year}: ${x.rows} строк`;
   return '';
 }
 async function load(before?: string) {

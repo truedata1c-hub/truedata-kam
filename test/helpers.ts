@@ -23,7 +23,12 @@ export interface TestEnv {
 }
 
 /** Отдельная база на каждый тестовый файл: миграции, демо-набор и второй клиент с одним пользователем. */
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+
 export async function setup(): Promise<TestEnv> {
+  process.env.FILES_DIR = mkdtempSync(path.join(tmpdir(), 'kam-files-'));
   const name = 'kam_test_' + randomUUID().replace(/-/g, '').slice(0, 12);
   const admin = new pg.Client({ connectionString: ADMIN_URL });
   await admin.connect();
@@ -95,3 +100,16 @@ export function api(env: TestEnv) {
 }
 
 export const C = (env: TestEnv, client = env.demo) => `/api/kam/v1/clients/${client}`;
+
+export function multipart(fields: Record<string, string>, file?: { name: string; content: Buffer; type?: string }) {
+  const boundary = '----kamtest' + Math.random().toString(16).slice(2);
+  const parts: Buffer[] = [];
+  for (const [k, v] of Object.entries(fields)) parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+  if (file) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${file.name}"\r\nContent-Type: ${file.type ?? 'application/octet-stream'}\r\n\r\n`));
+    parts.push(file.content, Buffer.from('\r\n'));
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+  return { payload: Buffer.concat(parts), headers: { 'content-type': `multipart/form-data; boundary=${boundary}` } };
+}
+

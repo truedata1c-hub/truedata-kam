@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.js';
 import { createPool, migrate } from './db.js';
 import { ssoConfigFromEnv } from './sso.js';
+import { upgradeDemo } from './demo.js';
 
 const url = process.env.DATABASE_URL;
 if (!url) {
@@ -29,6 +30,13 @@ const app = await buildApp({
 });
 const port = Number(process.env.PORT ?? 8080);
 await app.listen({ host: process.env.HOST ?? '0.0.0.0', port });
+
+// Стенд: при выпуске с новой версией демо-набора набор пересоздаётся после запуска (пароли демо-пользователей прежние).
+if (process.env.DEMO_AUTO_UPGRADE === '1' && process.env.KAM_DEMO_PASSWORD) {
+  upgradeDemo(db, process.env.KAM_DEMO_PASSWORD, process.env.DEMO_EMAIL_DOMAIN)
+    .then((done) => { if (done) app.log.info('demo data set upgraded'); })
+    .catch((e) => app.log.error(e, 'demo upgrade failed'));
+}
 
 const shutdown = async () => {
   await app.close();

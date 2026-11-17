@@ -13,9 +13,9 @@ const BASE = '/api/kam/v1';
 let onUnauthorized = () => {};
 export function setUnauthorizedHandler(fn: () => void) { onUnauthorized = fn; }
 
-async function request<T>(method: string, path: string, o: Options = {}): Promise<ApiResponse<T>> {
+async function request<T>(method: string, path: string, o: Options & { form?: FormData } = {}): Promise<ApiResponse<T>> {
   const headers: Record<string, string> = { accept: 'application/json' };
-  if (o.body !== undefined) headers['content-type'] = 'application/json';
+  if (o.body !== undefined && !o.form) headers['content-type'] = 'application/json';
   if (method !== 'GET') headers['idempotency-key'] = crypto.randomUUID();
   if (o.ifMatch) headers['if-match'] = o.ifMatch;
   const qs = o.query
@@ -23,7 +23,7 @@ async function request<T>(method: string, path: string, o: Options = {}): Promis
     : '';
   let res: Response;
   try {
-    res = await fetch(BASE + path + qs, { method, headers, credentials: 'same-origin', body: o.body === undefined ? undefined : JSON.stringify(o.body) });
+    res = await fetch(BASE + path + qs, { method, headers, credentials: 'same-origin', body: o.form ?? (o.body === undefined ? undefined : JSON.stringify(o.body)) });
   } catch {
     throw new ApiError(0, 'NETWORK', 'Нет связи с сервером. Проверьте подключение и повторите.');
   }
@@ -44,4 +44,6 @@ export const api = {
   post: <T = any>(path: string, body: unknown = {}, ifMatch?: string) => request<T>('POST', path, { body, ifMatch }),
   put: <T = any>(path: string, body: unknown = {}) => request<T>('PUT', path, { body }),
   patch: <T = any>(path: string, body: unknown, ifMatch?: string) => request<T>('PATCH', path, { body, ifMatch }),
+  upload: <T = any>(path: string, form: FormData) => request<T>('POST', path, { form }),
+  url: (path: string) => BASE + path,
 };
