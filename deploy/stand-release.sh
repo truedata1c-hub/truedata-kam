@@ -30,6 +30,7 @@ if [[ "$(dc exec -T db psql -U kam -d kam -tAc "select count(*) from kam.client 
   pass=$(grep -E '^KAM_DEMO_PASSWORD=' .env | cut -d= -f2-)
   dc exec -T -e KAM_PASSWORD="$pass" api node dist/src/cli.js seed-demo
 fi
+chown -R kam-deploy:kam-deploy "$APP_DIR"
 docker builder prune -f --filter until=24h >/dev/null 2>&1 || true
 
 host=$(grep -E '^KAM_HOST=' .env | cut -d= -f2-)

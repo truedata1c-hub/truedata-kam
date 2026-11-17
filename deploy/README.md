@@ -4,38 +4,25 @@
 
 ## Подготовка (однократно)
 
-На своём компьютере, из папки репозитория:
+Первый выпуск сделан скриптом `deploy/stand-release.sh` прямо на сервере. Чтобы дальше выпускать из GitHub, на Mac одна команда:
 
 ```sh
-# 1. Ключ, которым GitHub Actions будет выпускать версии
-ssh-keygen -t ed25519 -N "" -C kam-deploy-github -f ~/.ssh/truedata_kam_deploy
-
-# 2. Подготовка сервера: каталог данных, пользователь для выпусков, .env с паролями и ключами демо-платформы
-scp -r deploy root@185.39.206.103:/root/kam-server-deploy
-ssh root@185.39.206.103 "/root/kam-server-deploy/server/install.sh '$(cat ~/.ssh/truedata_kam_deploy.pub)'"
-#    В конце скрипт покажет пароль страницы /demo-platform — сохраните его.
-
-# 3. Отпечаток сервера для GitHub
-ssh-keyscan -t ed25519 185.39.206.103 2>/dev/null > /tmp/kam_known_hosts
+[ -f ~/.ssh/truedata_kam_deploy ] || ssh-keygen -q -t ed25519 -N "" -C kam-deploy-github -f ~/.ssh/truedata_kam_deploy && ssh root@185.39.206.103 "/root/kam-src/deploy/server/install.sh '$(cat ~/.ssh/truedata_kam_deploy.pub)' && chown -R kam-deploy:kam-deploy /opt/truedata/kam" && ssh-keyscan -t ed25519 185.39.206.103 2>/dev/null > ~/.ssh/truedata_kam_known_hosts && echo ГОТОВО
 ```
 
-В GitHub: репозиторий → Settings → Environments → создать окружение `stand` и добавить секреты:
+Ключ разрешает только запуск `kam-deploy` на сервере. Затем в GitHub: репозиторий → Settings → Environments → окружение `stand` → три секрета:
 
 | Секрет | Значение |
 | --- | --- |
 | `VPS_HOST` | `185.39.206.103` |
-| `VPS_SSH_KEY` | содержимое `~/.ssh/truedata_kam_deploy` (закрытый ключ) |
-| `VPS_KNOWN_HOSTS` | содержимое `/tmp/kam_known_hosts` |
+| `VPS_SSH_KEY` | `pbcopy < ~/.ssh/truedata_kam_deploy` и вставить |
+| `VPS_KNOWN_HOSTS` | `pbcopy < ~/.ssh/truedata_kam_known_hosts` и вставить |
 
-Чтобы сервер скачивал образы из реестра GitHub, один раз войти в реестр от имени пользователя выпусков (токен с правом `read:packages`):
-
-```sh
-ssh root@185.39.206.103 "sudo -u kam-deploy -H docker login ghcr.io -u <логин GitHub>"
-```
+Образ передаётся на сервер архивом через тот же ключ, вход сервера в реестр образов не нужен.
 
 ## Выпуск
 
-Тег вида `v0.1.0` в репозитории или ручной запуск workflow `deploy`. Скрипт `kam-deploy` на сервере берёт образ, поднимает версию и ждёт проверки состояния; если новая версия не поднялась — возвращает прежнюю.
+Тег вида `v0.1.1` в репозитории или ручной запуск workflow `deploy`. GitHub прогоняет тесты, собирает образ и передаёт его на сервер; `kam-deploy` поднимает версию, поднимает версию и ждёт проверки состояния; если новая версия не поднялась — возвращает прежнюю.
 
 После первого выпуска — демо-набор:
 

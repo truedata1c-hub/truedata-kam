@@ -69,4 +69,6 @@ if [[ -n "$PUBKEY" ]]; then
   echo "Ключ выпусков установлен. Отпечаток ключа сервера:"
   ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
 fi
+# Выпуски выполняет kam-deploy от своего пользователя: файлы стенда должны принадлежать ему.
+chown -R kam-deploy:kam-deploy "$APP_DIR"
 echo "Подготовка завершена: данные в $DATA_DIR, настройки в $APP_DIR/.env"

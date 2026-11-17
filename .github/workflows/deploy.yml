@@ -9,11 +9,11 @@ on:
         description: Имя версии (например, v0.1.0-rc1)
         required: true
       transport:
-        description: Доставка образа на VPS (registry — скачивание из ghcr.io только изменённых слоёв; archive — весь образ архивом через SSH)
+        description: Доставка образа на VPS (archive — весь образ архивом через SSH; registry — из ghcr.io, требует входа сервера в реестр)
         required: false
-        default: registry
+        default: archive
         type: choice
-        options: [registry, archive]
+        options: [archive, registry]
 
 permissions:
   contents: read
@@ -37,7 +37,7 @@ jobs:
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 10
     env:
       VERSION: ${{ github.event.inputs.version || github.ref_name }}
-      TRANSPORT: ${{ github.event.inputs.transport || 'registry' }}
+      TRANSPORT: ${{ github.event.inputs.transport || 'archive' }}
       REGISTRY_IMAGE: ghcr.io/truedata1c-hub/truedata-kam
       TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
     steps:
