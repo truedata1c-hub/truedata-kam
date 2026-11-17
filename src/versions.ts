@@ -7,8 +7,9 @@ import { type Ctx, campaignVisibility, canEditFor } from './access.js';
 import { type CommandResult, audit, bumpCampaign, campaignEtag, campaignEvent, isUuid, lockCampaign } from './commands.js';
 import { type Period, type Split, periodsFor, quartersOf, yearBack } from './periods.js';
 import { thresholds, type Thresholds } from './settings.js';
+import { checkTolerance } from './approval.js';
 
-const VERSION_STAGES = ['PREPARATION', 'NEGOTIATION'];
+const VERSION_STAGES = ['PREPARATION', 'NEGOTIATION', 'APPROVED'];
 const MAX_AMOUNT = 1e12;
 
 export const roi = (inv: number, turn: number) => (inv > 0 ? Math.round((turn / inv) * 100) / 100 : null);
@@ -77,7 +78,7 @@ export async function createVersion(tx: Tx, ctx: Ctx, campaignId: string, ifMatc
   await lockCampaign(tx, ctx, campaignId, ifMatch);
   const c = await campaignFor(tx, ctx, campaignId);
   if (!canEditFor(ctx, c.owner_id)) throw forbidden();
-  if (!VERSION_STAGES.includes(c.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Новую версию можно добавить на этапах подготовки и переговоров.');
+  if (!VERSION_STAGES.includes(c.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Новую версию можно добавить на этапах подготовки, переговоров и «Согласовано внутри». На согласовании сначала отзовите отправку.');
   const periods = campaignPeriods(c);
   const cells = await normalizeCells(tx, ctx.clientId, periods, b.cells);
   const justification = typeof b.justification === 'string' ? b.justification.trim() : '';
@@ -119,10 +120,23 @@ export async function createVersion(tx: Tx, ctx: Ctx, campaignId: string, ifMatc
     [ctx.clientId, id, JSON.stringify(cells)]);
   for (const [brand, note] of notes) await tx.query('insert into kam.offer_version_brand_note(client_id, version_id, brand_id, note) values ($1,$2,$3,$4)', [ctx.clientId, id, brand, note]);
   for (const d of docs) await tx.query('insert into kam.offer_version_document(client_id, version_id, document_id) values ($1,$2,$3)', [ctx.clientId, id, d]);
-  const rev = await bumpCampaign(tx, ctx, campaignId);
   await campaignEvent(tx, ctx, campaignId, 'VERSION_CREATED', { comment: comment || null, payload: { number, total_investment: totalInv, total_turnover: totalTurn } });
+  // После «Согласовано внутри»: в допусках этап сохраняется, иначе кампания возвращается в переговоры (ТЗ §4).
+  let stage = c.stage;
+  let tolerance: { within: boolean; reason: string } | null = null;
+  if (c.stage === 'APPROVED') {
+    tolerance = await checkTolerance(tx, ctx.clientId, campaignId, totalInv, totalTurn);
+    if (tolerance.within) await campaignEvent(tx, ctx, campaignId, 'VERSION_WITHIN_TOLERANCE', { comment: tolerance.reason, payload: { number } });
+    else {
+      await tx.query("update kam.approval set status='SUPERSEDED' where client_id=$1 and campaign_id=$2 and status='APPROVED'", [ctx.clientId, campaignId]);
+      await tx.query("update kam.campaign set stage='NEGOTIATION', stage_changed_at=now() where client_id=$1 and id=$2", [ctx.clientId, campaignId]);
+      await campaignEvent(tx, ctx, campaignId, 'STAGE', { from: 'APPROVED', to: 'NEGOTIATION', comment: tolerance.reason });
+      stage = 'NEGOTIATION';
+    }
+  }
+  const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'version', entityId: id, action: 'CREATE', after: { campaign_id: campaignId, number, total_investment: totalInv, total_turnover: totalTurn, brands: new Set(cells.map((x) => x.brand_id)).size } });
-  return { status: 201, body: { id, number, total_investment: totalInv, total_turnover: totalTurn }, etag: campaignEtag(campaignId, rev) };
+  return { status: 201, body: { id, number, total_investment: totalInv, total_turnover: totalTurn, stage, tolerance }, etag: campaignEtag(campaignId, rev) };
 }
 
 // Чтение версии ------------------------------------------------------------
@@ -288,3 +302,19 @@ export async function versionDraft(ctx: Ctx, campaignId: string) {
   const priorBrands = Object.fromEntries([...prior.byBrand.entries()].filter(([k]) => k !== '*').map(([k, v]) => [k, priorView(v)]));
   return { periods, base_number: latest?.number ?? null, cells, justification: latest?.justification ?? '', prior: priorBrands, prior_label: prior.label, thresholds: await thresholds(ctx.db, ctx.clientId) };
 }
+
+/** Итоги версии и прошлого периода для условий маршрута (ТЗ §5). */
+export async function versionMetrics(q: Q, clientId: string, c: { network_id: string; period_from: string; period_to: string }, versionId: string) {
+  const v = (await q.query<{ number: number; investment: number; turnover: number; justification: string }>(
+    'select number, total_investment::float8 investment, total_turnover::float8 turnover, justification from kam.offer_version where client_id=$1 and id=$2', [clientId, versionId])).rows[0];
+  if (!v) throw notFound();
+  const { rows } = await q.query<{ brand_id: string }>(
+    'select distinct brand_id from kam.offer_version_cell where client_id=$1 and version_id=$2 and (investment > 0 or turnover > 0)', [clientId, versionId]);
+  const prior = priorView((await priorFor(q, clientId, c.network_id, c.period_from, c.period_to)).byBrand.get('*'));
+  return {
+    number: v.number, investment: v.investment, turnover: v.turnover, roi: roi(v.investment, v.turnover), justification: v.justification,
+    brand_ids: rows.map((r) => r.brand_id),
+    prior_fact_investment: prior?.fact_investment ?? null, prior_fact_roi: prior?.fact_roi ?? null,
+  };
+}
+export type VersionMetrics = Awaited<ReturnType<typeof versionMetrics>>;

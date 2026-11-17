@@ -5,6 +5,7 @@ import { randomUUID } from 'node:crypto';
 import type { Tx } from './db.js';
 import { ApiError, invalid, notFound, required } from './errors.js';
 import { type Ctx, PERMISSIONS, SCOPES, type Permission, type Scope, requirePermission } from './access.js';
+import { ensureRoleNotInRoutes } from './routes.js';
 import { type CommandResult, audit, isUuid } from './commands.js';
 import { hashPassword, temporaryPassword } from './auth.js';
 
@@ -73,6 +74,7 @@ export async function updateRole(tx: Tx, ctx: Ctx, id: string, b: Record<string,
   const archived = b.archived === undefined ? before.archived : Boolean(b.archived);
   // Нельзя лишить клиента последнего администратора: иначе настройки станут недоступны.
   if (before.permissions.includes('ADMIN') && (!r.permissions.includes('ADMIN') || archived)) await ensureOtherAdmin(tx, ctx, { roleId: id });
+  if (before.permissions.includes('APPROVE') && (!r.permissions.includes('APPROVE') || archived)) await ensureRoleNotInRoutes(tx, ctx.clientId, id);
   await tx.query('update kam.business_role set name=$3, description=$4, permissions=$5, scope=$6, archived=$7 where client_id=$1 and id=$2',
     [ctx.clientId, id, r.name, r.description, r.permissions, r.scope, archived]);
   await audit(tx, ctx, { entityType: 'role', entityId: id, action: 'UPDATE', before, after: { ...r, archived } });

@@ -68,11 +68,16 @@ export function campaignVisibility(ctx: Ctx, start: number): { sql: string; para
   const a = ctx.access;
   if (seesAll(a)) return { sql: 'true', params: [] };
   const users = a.scopes.has('SUBORDINATES') ? a.team : [ctx.principal.userId];
+  // Согласующий видит кампанию, по которой он исполнитель шага (или замещает исполнителя), даже вне своей области.
   return {
     sql: `(c.owner_id = any($${start}::uuid[]) or exists (
             select 1 from kam.kam_assignment ka where ka.client_id = c.client_id and ka.network_id = c.network_id
-               and ka.user_id = any($${start}::uuid[]) and ka.valid @> current_date))`,
-    params: [users],
+               and ka.user_id = any($${start}::uuid[]) and ka.valid @> current_date)
+          or exists (select 1 from kam.approval_step st where st.client_id = c.client_id and st.campaign_id = c.id
+               and (st.candidates @> array[$${start + 1}::uuid] or st.decided_by = $${start + 1}
+                    or exists (select 1 from kam.substitution sb where sb.client_id = st.client_id and sb.deputy_id = $${start + 1}
+                                 and sb.valid @> current_date and sb.user_id = any(st.candidates)))))`,
+    params: [users, ctx.principal.userId],
   };
 }
 

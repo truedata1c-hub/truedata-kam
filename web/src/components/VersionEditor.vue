@@ -119,7 +119,7 @@ import Icon from './Icon.vue';
 import TdSelect from './TdSelect.vue';
 
 const props = defineProps<{ campaignId: string; etag: string; title: string; documents: Doc[] }>();
-const emit = defineEmits<{ close: []; saved: [number: number] }>();
+const emit = defineEmits<{ close: []; saved: [number: number, info: { stage: string; tolerance: { within: boolean; reason: string } | null }] }>();
 const { err, busy, run } = useCommand();
 type Metric = 'investment' | 'turnover';
 const metric = ref<Metric>('investment');
@@ -259,9 +259,9 @@ async function save() {
     }
   }
   const brand_notes = Object.fromEntries(Object.entries(notes).filter(([id, n]) => n?.trim() && cells.some((c) => c.brand_id === id)));
-  const r = await run(() => api.post<{ number: number }>(`${base()}/campaigns/${props.campaignId}/versions`,
+  const r = await run(() => api.post<{ number: number; stage: string; tolerance: { within: boolean; reason: string } | null }>(`${base()}/campaigns/${props.campaignId}/versions`,
     { cells, justification: justification.value, comment: comment.value, brand_notes, document_ids: docIds.value }, props.etag));
-  if (r) emit('saved', r.data.number);
+  if (r) emit('saved', r.data.number, { stage: r.data.stage, tolerance: r.data.tolerance ?? null });
 }
 
 onMounted(async () => {

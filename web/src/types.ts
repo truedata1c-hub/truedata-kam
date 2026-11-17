@@ -48,3 +48,28 @@ export interface Draft {
   justification: string; prior: Record<string, PriorView | null>; prior_label: string;
   thresholds: { investment_growth_pct: number; execution_below_pct: number; roi_below_prior: boolean };
 }
+
+export interface RouteStepView {
+  position: number; title: string; assignee_rule: string; condition_text: string; deadline_days: number;
+  included: boolean; skip_reason: string | null; candidates: { id: string; name: string }[]; assign_note: string | null; error: string | null;
+}
+export interface ApprovalStep {
+  id: string; position: number; title: string; assignee_rule: string; condition_text: string; status: 'WAITING' | 'ACTIVE' | 'APPROVED' | 'REJECTED' | 'SKIPPED' | 'CANCELLED';
+  skip_reason: string | null; assign_note: string | null; deadline_days: number; activated_at: string | null; due_date: string | null; overdue: boolean;
+  decided_at: string | null; decision_comment: string | null; decided_by_name: string | null; decided_for_name: string | null;
+  candidate_users: { id: string; name: string }[]; deputies: { user: string; deputy: string; to: string }[];
+}
+export interface ApprovalRound {
+  id: string; round: number; status: 'IN_PROGRESS' | 'APPROVED' | 'REJECTED' | 'WITHDRAWN' | 'SUPERSEDED' | 'CANCELLED'; template_name: string;
+  submitted_at: string; finished_at: string | null; submit_comment: string; submitted_by_name: string; version: number;
+  investment: number; turnover: number; tolerance_investment_pct: number; tolerance_turnover_pct: number; steps: ApprovalStep[];
+}
+export interface ApprovalView {
+  rounds: ApprovalRound[]; current: ApprovalRound | null; my_decision: { step_id: string; for_user: string | null } | null; can_withdraw: boolean;
+  preview: { template: { id: string; name: string; rule: string | null; tolerance_investment_pct: number; tolerance_turnover_pct: number } | null; steps: RouteStepView[]; version: number | null; problems: string[] } | null;
+}
+export type Assignee = { kind: 'MANAGER'; level: number } | { kind: 'ROLE'; role_id: string; scoped: boolean } | { kind: 'USER'; user_id: string };
+export type Condition = { kind: 'INVESTMENT_GTE'; amount: number } | { kind: 'GROWTH_GTE'; pct: number } | { kind: 'ROI_BELOW_PRIOR' } | { kind: 'TYPE_IN' | 'NETWORK_IN' | 'GROUP_IN' | 'BRAND_IN'; ids: string[] };
+export interface StepDef { title: string; assignee: Assignee; conditions: Condition[]; deadline_days: number; assignee_text?: string; conditions_text?: string[] }
+export interface RouteTemplate { id: string; name: string; description: string; is_default: boolean; steps: StepDef[]; tolerance_investment_pct: number; tolerance_turnover_pct: number; revision: number; updated_at: string; in_progress: number }
+export interface RouteRule { id?: string; priority?: number; template_id: string; campaign_type_id: string | null; network_group_id: string | null; type_name?: string | null; group_name?: string | null }

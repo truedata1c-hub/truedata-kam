@@ -6,6 +6,7 @@ import type { Tx } from './db.js';
 import { ApiError, forbidden, invalid, notFound, required } from './errors.js';
 import { type Ctx, campaignVisibility, canEditFor, isAssigned } from './access.js';
 import { type CommandResult, audit, bumpCampaign, campaignEtag, campaignEvent, isUuid, lockCampaign } from './commands.js';
+import { closeApproval } from './approval.js';
 
 export const STAGES = ['PREPARATION', 'NEGOTIATION', 'APPROVAL', 'APPROVED', 'CONFIRMED', 'FINAL', 'CANCELLED', 'CLOSED'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -124,7 +125,8 @@ function actionsFor(ctx: Ctx, c: { stage: Stage; owner_id: string }) {
   if (edit && c.stage === 'PREPARATION') a.push('START_NEGOTIATION');
   if (edit && CANCELLABLE.includes(c.stage)) a.push('CANCEL');
   if (edit && c.stage === 'FINAL') a.push('CLOSE');
-  if (edit && EDITABLE_STAGES.includes(c.stage)) a.push('NEW_VERSION');
+  if (edit && (EDITABLE_STAGES.includes(c.stage) || c.stage === 'APPROVED')) a.push('NEW_VERSION');
+  if (edit && c.stage === 'NEGOTIATION') a.push('SUBMIT');
   if (edit && c.stage !== 'CANCELLED' && c.stage !== 'CLOSED') a.push('UPLOAD');
   return a;
 }
@@ -288,6 +290,7 @@ export async function transition(tx: Tx, ctx: Ctx, id: string, ifMatch: string |
     if (!comment) throw required('comment', 'Укажите причину отмены.');
     to = 'CANCELLED';
   }
+  if (to === 'CANCELLED') await closeApproval(tx, ctx.clientId, id, 'CANCELLED');
   await tx.query(
     'update kam.campaign set stage=$3, stage_changed_at=now(), cancel_reason=$4 where client_id=$1 and id=$2',
     [ctx.clientId, id, to, to === 'CANCELLED' ? comment : null]);

@@ -18,6 +18,8 @@ import * as versions from './versions.js';
 import * as documents from './documents.js';
 import * as prior from './prior.js';
 import * as settings from './settings.js';
+import * as routeTemplates from './routes.js';
+import * as approval from './approval.js';
 import { parseVersion, versionTemplate } from './excel.js';
 import { MAX_FILE_BYTES } from './files.js';
 
@@ -231,6 +233,23 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   });
   app.get(`${C}/campaigns/:id/versions/:number`, async (req) => versions.getVersion(await ctxOf(req), param(req, 'id'), param(req, 'number')));
   app.post(`${C}/campaigns/:id/versions`, command((tx, ctx, req) => versions.createVersion(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
+
+  // Согласование
+  app.get(`${C}/campaigns/:id/approval`, async (req) => approval.getApproval(await ctxOf(req), param(req, 'id')));
+  app.post(`${C}/campaigns/:id/approval/submit`, command((tx, ctx, req) => approval.submit(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
+  app.post(`${C}/campaigns/:id/approval/withdraw`, command((tx, ctx, req) => approval.withdraw(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
+  app.post(`${C}/campaigns/:id/approval/decision`, command((tx, ctx, req) => approval.decide(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
+  app.get(`${C}/my-decisions`, async (req) => approval.myDecisions(await ctxOf(req), (req.query as { status?: string }).status));
+  app.get(`${C}/my-decisions/count`, async (req) => ({ pending: await approval.pendingCount(await ctxOf(req)) }));
+  app.get(`${C}/substitutions`, async (req) => approval.listSubstitutions(await ctxOf(req)));
+  app.post(`${C}/substitutions`, command((tx, ctx, req) => approval.createSubstitution(tx, ctx, body(req))));
+  app.post(`${C}/substitutions/:sid/end`, command((tx, ctx, req) => approval.deleteSubstitution(tx, ctx, param(req, 'sid'))));
+  app.get(`${C}/route-templates`, async (req) => routeTemplates.listTemplates(await ctxOf(req)));
+  app.post(`${C}/route-templates`, command((tx, ctx, req) => routeTemplates.saveTemplate(tx, ctx, null, body(req))));
+  app.put(`${C}/route-templates/:tid`, command((tx, ctx, req) => routeTemplates.saveTemplate(tx, ctx, param(req, 'tid'), body(req))));
+  app.post(`${C}/route-templates/:tid/archive`, command((tx, ctx, req) => routeTemplates.archiveTemplate(tx, ctx, param(req, 'tid'))));
+  app.put(`${C}/route-rules`, command((tx, ctx, req) => routeTemplates.saveRules(tx, ctx, body(req))));
+  app.post(`${C}/route-templates/preview`, async (req) => routeTemplates.previewTemplate(await ctxOf(req), body(req)));
 
   // Документы
   app.get(`${C}/campaigns/:id/documents`, async (req) => {

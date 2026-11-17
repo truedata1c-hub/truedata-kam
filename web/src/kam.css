@@ -118,3 +118,7 @@ button.kpi:hover { background: var(--hover); }
 .miniTable tr.current td { background: var(--purple-soft); }
 .kpiValue .muted { font-size: 12px; }
 a.tdBtn { text-decoration: none; }
+.tdBtn.dangerSolid { background: var(--red); border-color: var(--red); color: #fff; }
+.tdBtn.dangerSolid:hover { filter: brightness(0.95); }
+.tdBtn.dangerSolid:disabled { opacity: 0.5; }
+.navBadge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--purple); color: #fff; font-size: 11px; font-weight: 600; display: inline-grid; place-items: center; }

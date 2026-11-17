@@ -13,8 +13,8 @@ export interface Reference {
   assignable: { id: string; name: string; network_ids: string[] }[];
 }
 
-export type Page = 'portfolio' | 'campaign' | 'decisions' | 'analytics' | 'users' | 'roles' | 'networks' | 'brands' | 'types' | 'prior' | 'settings' | 'audit';
-const ADMIN_PAGES = ['users', 'roles', 'networks', 'brands', 'types', 'prior', 'settings', 'audit'];
+export type Page = 'portfolio' | 'campaign' | 'decisions' | 'analytics' | 'users' | 'roles' | 'networks' | 'brands' | 'types' | 'routes' | 'substitutions' | 'prior' | 'settings' | 'audit';
+const ADMIN_PAGES = ['users', 'roles', 'networks', 'brands', 'types', 'routes', 'substitutions', 'prior', 'settings', 'audit'];
 
 const params = new URLSearchParams(location.search);
 export const embedded = params.get('embed') === '1';
@@ -25,6 +25,7 @@ export const state = reactive({
   page: 'portfolio' as Page,
   campaignId: null as string | null,
   ref: null as Reference | null,
+  pendingDecisions: 0,
 });
 
 export const company = computed(() => state.me?.companies.find((c) => c.id === state.companyId) ?? null);
@@ -65,4 +66,10 @@ export function go(page: Page, id?: string) {
 export function announceTitle(title: string) {
   document.title = title ? `${title} · Переговоры` : 'PharmaCheck · Переговоры';
   if (embedded && window.parent !== window) window.parent.postMessage({ type: 'kam:title', title }, '*');
+}
+
+/** Число шагов, ждущих решения пользователя (значок у «Мои решения»). */
+export async function refreshPending() {
+  if (!state.companyId) return;
+  try { state.pendingDecisions = (await api.get<{ pending: number }>(`${base()}/my-decisions/count`)).pending; } catch { /* значок не критичен */ }
 }

@@ -129,6 +129,8 @@
         </div>
       </div>
 
+      <div class="stack">
+      <ApprovalPanel :campaign-id="c.id" :etag="etag" :view="approval" @changed="onApprovalChanged" />
       <div class="panel">
         <div class="panelHead"><div class="panelTitle">История</div></div>
         <div class="panelBody">
@@ -141,6 +143,7 @@
             </li>
           </ul>
         </div>
+      </div>
       </div>
     </div>
 
@@ -170,15 +173,16 @@
 import { computed, inject, onMounted, ref } from 'vue';
 import { useQuasar } from 'quasar';
 import { api, ApiError } from '../api';
-import { base, go, announceTitle } from '../store';
+import { base, go, announceTitle, refreshPending } from '../store';
 import { useCommand } from '../command';
 import { HIGHLIGHT, STAGES, STAGE_LABEL, campaignNo, deltaPct, fmtDate, fmtDelta, fmtPeriod, fmtRoi, fmtShort, fmtTime, plural } from '../format';
 import Icon from '../components/Icon.vue';
 import EditCampaignDialog from '../components/EditCampaignDialog.vue';
-import type { Campaign, Doc, Version, VersionSummary } from '../types';
+import type { ApprovalView, Campaign, Doc, Version, VersionSummary } from '../types';
 import BreakdownTable from '../components/BreakdownTable.vue';
 import VersionEditor from '../components/VersionEditor.vue';
 import DocumentsPanel from '../components/DocumentsPanel.vue';
+import ApprovalPanel from '../components/ApprovalPanel.vue';
 
 const props = defineProps<{ id: string }>();
 const $q = useQuasar();
@@ -195,6 +199,11 @@ const versions = ref<VersionSummary[]>([]);
 const version = ref<Version | null>(null);
 const documents = ref<Doc[]>([]);
 const editorOpen = ref(false);
+const approval = ref<ApprovalView | null>(null);
+async function loadApproval() {
+  approval.value = await api.get<ApprovalView>(`${base()}/campaigns/${props.id}/approval`);
+}
+const onApprovalChanged = () => Promise.all([load(), loadApproval(), refreshPending()]);
 type Metric = 'investment' | 'turnover' | 'roi';
 const metric = ref<Metric>('investment');
 const metrics: { key: Metric; label: string }[] = [{ key: 'investment', label: 'Инвестиции' }, { key: 'turnover', label: 'Оборот' }, { key: 'roi', label: 'ROI' }];
@@ -214,11 +223,12 @@ async function openVersion(n: number) {
 async function loadDocs() {
   documents.value = (await api.get<{ items: Doc[] }>(`${base()}/campaigns/${props.id}/documents`)).items;
 }
-const onDocsChanged = () => Promise.all([loadDocs(), load()]);
-async function afterVersion(n: number) {
+const onDocsChanged = () => Promise.all([loadDocs(), load(), loadApproval()]);
+async function afterVersion(n: number, info?: { stage: string; tolerance: { within: boolean; reason: string } | null }) {
   editorOpen.value = false;
   $q.notify({ type: 'positive', message: `Версия ${n} сохранена` });
-  await Promise.all([load(), loadVersions(), loadDocs()]);
+  if (info?.tolerance) $q.notify({ type: info.tolerance.within ? 'info' : 'warning', message: info.tolerance.reason, timeout: 8000 });
+  await Promise.all([load(), loadVersions(), loadDocs(), loadApproval()]);
 }
 
 const has = (a: string) => c.value?.actions.includes(a) ?? false;
@@ -241,6 +251,10 @@ function eventTitle(e: Campaign['events'][number]) {
   if (e.kind === 'VERSION_CREATED') return `Версия ${e.payload?.number}: ${fmtShort(e.payload?.total_investment)} инвестиций`;
   if (e.kind === 'DOCUMENT_UPLOADED') return `Загружен документ «${e.payload?.file_name}»`;
   if (e.kind === 'DOCUMENT_ARCHIVED') return `Документ «${e.payload?.file_name}» в архиве`;
+  if (e.kind === 'APPROVAL_SUBMITTED') return `Отправлено на согласование: версия ${e.payload?.number ?? e.payload?.version}, маршрут «${e.payload?.template}»`;
+  if (e.kind === 'APPROVAL_DECISION') return `${e.payload?.decision === 'REJECT' ? 'Отклонено' : 'Согласовано'}: шаг «${e.payload?.title}»${e.payload?.for_user_name ? ` (за ${e.payload.for_user_name})` : ''}`;
+  if (e.kind === 'APPROVAL_WITHDRAWN') return 'Отправка отозвана с согласования';
+  if (e.kind === 'VERSION_WITHIN_TOLERANCE') return `Версия ${e.payload?.number} в пределах допусков — согласование сохранено`;
   if (e.kind === 'STAGE') return `${STAGE_LABEL[e.from_stage ?? ''] ?? ''} → ${STAGE_LABEL[e.to_stage ?? ''] ?? ''}`;
   return e.kind;
 }
@@ -265,7 +279,7 @@ async function move(action: string, comment?: string) {
   if (r) {
     cancelDlg.value = false;
     $q.notify({ type: 'positive', message: action === 'CANCEL' ? 'Кампания отменена' : `Этап: ${STAGE_LABEL[r.data.stage]}` });
-    await load();
+    await Promise.all([load(), loadApproval()]);
   } else if (err.message && !cancelDlg.value) {
     $q.notify({ type: 'negative', message: err.message });
     if (err.code === 'STALE_REVISION') await load();
@@ -279,5 +293,5 @@ async function afterSave(warnings: { message: string }[]) {
   await load();
 }
 
-onMounted(async () => { await load(); if (c.value) await Promise.all([loadVersions(), loadDocs()]); });
+onMounted(async () => { await load(); if (c.value) await Promise.all([loadVersions(), loadDocs(), loadApproval()]); });
 </script>

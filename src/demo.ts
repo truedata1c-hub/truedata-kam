@@ -10,10 +10,12 @@ import { periodsFor, type Split } from './periods.js';
 import { versionTemplate } from './excel.js';
 import { filesDir, mimeOf, storeBuffer } from './files.js';
 import { writeSetting } from './settings.js';
+import { computeRoute } from './routes.js';
+import { addWorkdays } from './approval.js';
 
 export const DEMO_CODE = 'DEMO';
 /** Версия демо-набора: при её росте стенд пересоздаёт набор при запуске (DEMO_AUTO_UPGRADE). */
-export const DEMO_VERSION = 2;
+export const DEMO_VERSION = 3;
 
 function rng(seed: number) {
   return () => {
@@ -183,7 +185,6 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
     // Кампании ---------------------------------------------------------------
     let number = 0;
     let campaigns = 0;
-    const headOf = (kam: string) => USERS.find((u) => u.email === kam)!.manager!;
     const made: { id: string; net: (typeof nets)[number]; type: string; from: string; to: string; stage: string; owner: string; times: Date[] }[] = [];
     const insertCampaign = async (o: { net: (typeof nets)[number]; type: keyof typeof typeIds; title: string; from: string; to: string; control: string; stage: string; created: string; cancel?: string }) => {
       const id = randomUUID();
@@ -210,8 +211,9 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
       await ev('CREATED', times[0]!, owner, null, 'PREPARATION');
       for (let i = 1; i < steps.length; i++) {
         const to = steps[i]!;
-        const actor = to === 'APPROVED' ? userIds[headOf(o.net.kam)]! : owner;
-        await ev('STAGE', times[i]!, actor, steps[i - 1]!, to, to === 'APPROVED' ? 'Согласовано в демо-наборе.' : null);
+        // Переход «Согласовано внутри» пишет демо-согласование (seedApprovals) — от имени последнего согласующего.
+        if (to === 'APPROVED') continue;
+        await ev('STAGE', times[i]!, owner, steps[i - 1]!, to, null);
       }
       if (o.stage === 'CANCELLED') await ev('STAGE', stageAt, owner, 'NEGOTIATION', 'CANCELLED', o.cancel ?? null);
       made.push({ id, net: o.net, type: o.type, from: o.from, to: o.to, stage: o.stage, owner, times: o.stage === 'CANCELLED' ? [...times, stageAt] : times });
@@ -253,6 +255,8 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
     }
     await tx.query('insert into kam.campaign_counter(client_id, last_no) values ($1,$2)', [clientId, number]);
     await seedVersions(tx, { clientId, nets, made, brandIds, userIds, typeSplit: Object.fromEntries(TYPES.map((t) => [t.key, t.split])), filesDir: opts.filesDir ?? filesDir() });
+    await seedRoutes(tx, { clientId, roleIds, typeIds, userIds, today });
+    await seedApprovals(tx, { clientId, made, today });
     await writeSetting(tx, clientId, 'demo_version', DEMO_VERSION);
     return { clientId, users: USERS.length, campaigns };
   });
@@ -262,7 +266,7 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
 async function purgeClient(tx: Tx, clientId: string) {
   await tx.query('alter table kam.audit_event disable trigger audit_event_no_update');
   await tx.query("select set_config('kam.purge', 'on', true)");
-  for (const t of ['offer_version_document', 'offer_version_brand_note', 'offer_version_cell', 'offer_version', 'document', 'prior_period', 'client_setting', 'campaign_event', 'campaign_legal_entity', 'campaign', 'campaign_counter', 'kam_assignment', 'legal_entity', 'network', 'network_group',
+  for (const t of ['approval_step', 'approval', 'route_rule', 'route_template', 'substitution', 'offer_version_document', 'offer_version_brand_note', 'offer_version_cell', 'offer_version', 'document', 'prior_period', 'client_setting', 'campaign_event', 'campaign_legal_entity', 'campaign', 'campaign_counter', 'kam_assignment', 'legal_entity', 'network', 'network_group',
     'user_brand', 'brand', 'user_manager', 'user_business_role', 'business_role', 'campaign_type', 'idempotency_request', 'audit_event', 'membership']) {
     await tx.query(`delete from kam.${t} where client_id = $1`, [clientId]);
   }
@@ -396,4 +400,134 @@ export async function upgradeDemo(db: Db, password: string, domain?: string): Pr
   if (!c || (c.v ?? 1) >= DEMO_VERSION) return false;
   await seedDemo(db, { password, reset: true, domain });
   return true;
+}
+
+// Маршруты и согласования демо-набора ------------------------------------------
+
+async function seedRoutes(tx: Tx, o: { clientId: string; roleIds: Record<string, string>; typeIds: Record<string, string>; userIds: Record<string, string>; today: string }) {
+  const day = (offset: number) => new Date(Date.parse(o.today + 'T00:00:00Z') + offset * 86400_000).toISOString().slice(0, 10);
+  const templates = [
+    { key: 'annual', name: 'Годовые условия', description: 'Руководитель КАМ → национальный руководитель → финансовый директор при инвестициях от 10 млн ₽.', def: false, tolInv: 2, tolTurn: 5,
+      steps: [
+        { title: 'Руководитель КАМ', assignee: { kind: 'MANAGER', level: 1 }, conditions: [], deadline_days: 3 },
+        { title: 'Национальный руководитель', assignee: { kind: 'MANAGER', level: 2 }, conditions: [], deadline_days: 3 },
+        { title: 'Финансовый директор', assignee: { kind: 'ROLE', role_id: o.roleIds.cfo, scoped: false }, conditions: [{ kind: 'INVESTMENT_GTE', amount: 10_000_000 }], deadline_days: 5 },
+      ] },
+    { key: 'promo', name: 'Разовая акция', description: 'Руководитель КАМ → финансовый контролёр при инвестициях от 250 тыс. ₽.', def: false, tolInv: 0, tolTurn: 0,
+      steps: [
+        { title: 'Руководитель КАМ', assignee: { kind: 'MANAGER', level: 1 }, conditions: [], deadline_days: 2 },
+        { title: 'Финансовый контролёр', assignee: { kind: 'ROLE', role_id: o.roleIds.controller, scoped: false }, conditions: [{ kind: 'INVESTMENT_GTE', amount: 250_000 }], deadline_days: 3 },
+      ] },
+    { key: 'default', name: 'По умолчанию', description: 'Для типов без отдельного правила: согласует руководитель КАМ.', def: true, tolInv: 0, tolTurn: 0,
+      steps: [{ title: 'Руководитель КАМ', assignee: { kind: 'MANAGER', level: 1 }, conditions: [], deadline_days: 3 }] },
+  ];
+  const ids: Record<string, string> = {};
+  for (const t of templates) {
+    ids[t.key] = randomUUID();
+    await tx.query(
+      `insert into kam.route_template(client_id, id, name, description, is_default, steps, tolerance_investment_pct, tolerance_turnover_pct) values ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [o.clientId, ids[t.key], t.name, t.description, t.def, JSON.stringify(t.steps), t.tolInv, t.tolTurn]);
+  }
+  await tx.query('insert into kam.route_rule(client_id, id, priority, template_id, campaign_type_id) values ($1,$2,10,$3,$4), ($1,$5,20,$6,$7)',
+    [o.clientId, randomUUID(), ids.annual, o.typeIds.annual, randomUUID(), ids.promo, o.typeIds.promo]);
+  // Финансовый директор в отпуске — его шаги решает финансовый контролёр.
+  await tx.query(`insert into kam.substitution(client_id, id, user_id, deputy_id, valid, comment, created_by) values ($1,$2,$3,$4, daterange($5::date, $6::date, '[]'), $7, $3)`,
+    [o.clientId, randomUUID(), o.userIds['igor.vasiliev'], o.userIds['natalia.popova'], day(-2), day(9), 'Отпуск']);
+}
+
+const APPROVE_NOTES = ['', '', 'Согласовано.', 'Ок, при условии выполнения плана по ключевым брендам.', 'Экономика в норме.', ''];
+const REJECT_NOTES = [
+  'Рост инвестиций выше факта прошлого года не обоснован. Снизьте ставку по брендам с невыполненным планом.',
+  'ROI ниже прошлого года — пересмотрите распределение по брендам.',
+  'Нужна ступенчатая шкала за выполнение плана, фиксированная ставка не подходит.',
+];
+
+async function seedApprovals(tx: Tx, o: { clientId: string; today: string; made: { id: string; stage: string; owner: string; times: Date[] }[] }) {
+  const r = rng(20271201);
+  const pick = <T>(a: readonly T[]) => a[Math.floor(r() * a.length)]!;
+  const now = Date.parse(o.today + 'T18:00:00Z');
+  const ev = (campaignId: string, kind: string, at: Date, actor: string, extra: { from?: string; to?: string; comment?: string | null; payload?: unknown } = {}) =>
+    tx.query('insert into kam.campaign_event(client_id, id, campaign_id, kind, from_stage, to_stage, comment, payload, actor, at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+      [o.clientId, randomUUID(), campaignId, kind, extra.from ?? null, extra.to ?? null, extra.comment ?? null, extra.payload === undefined ? null : JSON.stringify(extra.payload), actor, at]);
+  const after = ['APPROVAL', 'APPROVED', 'CONFIRMED', 'FINAL', 'CLOSED'];
+
+  const round = async (c: { id: string; owner: string }, v: { id: string; number: number; investment: number; turnover: number }, n: number,
+    submittedAt: Date, mode: 'progress' | 'approved' | 'rejected', endAt: Date) => {
+    const route = await computeRoute(tx, o.clientId, c.id, v.id, c.owner);
+    if (route.steps.some((s) => s.included && s.error)) return null;
+    const included = route.steps.filter((s) => s.included);
+    const decideCount = mode === 'approved' ? included.length : mode === 'rejected' ? 1 + Math.floor(r() * included.length)
+      : r() < 0.5 ? included.length - 1 : Math.floor(r() * included.length);
+    const span = Math.max(3600_000, endAt.getTime() - submittedAt.getTime());
+    const stamps = included.map((_, i) => new Date(submittedAt.getTime() + (span * (i + 1)) / (included.length + (mode === 'progress' ? 1 : 0)) - 1800_000));
+    const status = mode === 'approved' ? 'APPROVED' : mode === 'rejected' ? 'REJECTED' : 'IN_PROGRESS';
+    const approvalId = randomUUID();
+    await tx.query(
+      `insert into kam.approval(client_id, id, campaign_id, version_id, round, template_id, template_name, status, submitted_by, submitted_at, finished_at,
+                                total_investment, total_turnover, tolerance_investment_pct, tolerance_turnover_pct)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+      [o.clientId, approvalId, c.id, v.id, n, route.template.id, route.template.name, status, c.owner, submittedAt, status === 'IN_PROGRESS' ? null : stamps[decideCount - 1],
+        v.investment, v.turnover, route.template.tolerance_investment_pct, route.template.tolerance_turnover_pct]);
+    await ev(c.id, 'APPROVAL_SUBMITTED', submittedAt, c.owner, { payload: { round: n, version: v.number, template: route.template.name, steps: included.length, skipped: route.steps.length - included.length } });
+    let idx = 0;
+    let last: { actor: string; at: Date } | null = null;
+    for (const s of route.steps) {
+      let st = 'SKIPPED', decidedBy: string | null = null, at: Date | null = null, comment: string | null = null, activated: Date | null = null, due: string | null = null;
+      if (s.included) {
+        const i = idx++;
+        activated = i === 0 ? submittedAt : stamps[i - 1]!;
+        if (i < decideCount) {
+          const rejecting = mode === 'rejected' && i === decideCount - 1;
+          st = rejecting ? 'REJECTED' : 'APPROVED';
+          decidedBy = pick(s.candidates).id;
+          at = stamps[i]!;
+          comment = rejecting ? pick(REJECT_NOTES) : pick(APPROVE_NOTES) || null;
+          last = { actor: decidedBy, at };
+        } else if (i === decideCount && mode === 'progress') st = 'ACTIVE';
+        else st = mode === 'rejected' ? 'CANCELLED' : 'WAITING';
+        if (st !== 'WAITING' && st !== 'CANCELLED') due = addWorkdays(activated.toISOString().slice(0, 10), s.deadline_days);
+        else activated = null;
+      }
+      await tx.query(
+        `insert into kam.approval_step(client_id, id, approval_id, campaign_id, position, title, assignee_rule, condition_text, status, skip_reason, candidates, assign_note,
+                                       deadline_days, activated_at, due_date, decided_by, decision_comment, decided_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+        [o.clientId, randomUUID(), approvalId, c.id, s.position, s.title, s.assignee_rule, s.condition_text, st, s.skip_reason, s.candidates.map((x) => x.id), s.assign_note,
+          s.deadline_days, activated, due, decidedBy, comment, at]);
+      if (decidedBy && at) {
+        await ev(c.id, 'APPROVAL_DECISION', at, decidedBy, { comment, payload: { round: n, step: s.position, title: s.title, decision: st === 'APPROVED' ? 'APPROVE' : 'REJECT', for_user: null } });
+      }
+    }
+    return last;
+  };
+
+  for (const c of o.made) {
+    const versions = (await tx.query<{ id: string; number: number; investment: number; turnover: number; created_at: Date }>(
+      'select id, number, total_investment::float8 investment, total_turnover::float8 turnover, created_at from kam.offer_version where client_id=$1 and campaign_id=$2 order by number',
+      [o.clientId, c.id])).rows;
+    if (!versions.length) continue;
+    const latest = versions[versions.length - 1]!;
+    let n = 0;
+    // Отклонённый раунд по предыдущей версии: у части кампаний в переговорах и дальше.
+    if (versions.length >= 2 && (c.stage === 'NEGOTIATION' || after.includes(c.stage)) && r() < 0.45) {
+      const prev = versions[versions.length - 2]!;
+      const from = new Date(prev.created_at.getTime() + 3600_000);
+      const to = new Date(Math.max(from.getTime() + 7200_000, latest.created_at.getTime() - 3600_000));
+      const res = await round(c, prev, ++n, from, 'rejected', to);
+      if (res) {
+        await ev(c.id, 'STAGE', from, c.owner, { from: 'NEGOTIATION', to: 'APPROVAL' });
+        await ev(c.id, 'STAGE', res.at, res.actor, { from: 'APPROVAL', to: 'NEGOTIATION', comment: 'Отклонено согласующим — нужна новая версия.' });
+      } else n--;
+    }
+    if (!after.includes(c.stage)) continue;
+    const t = c.times;
+    const submittedAt = t[2] ?? t[t.length - 1]!;
+    if (submittedAt.getTime() < latest.created_at.getTime()) continue;
+    if (c.stage === 'APPROVAL') {
+      await round(c, latest, ++n, submittedAt, 'progress', new Date(now));
+    } else {
+      const res = await round(c, latest, ++n, submittedAt, 'approved', t[3] ?? new Date(now));
+      if (res) await ev(c.id, 'STAGE', t[3] ?? res.at, res.actor, { from: 'APPROVAL', to: 'APPROVED', comment: 'Все шаги маршрута согласованы.' });
+    }
+  }
 }
