@@ -20,6 +20,8 @@ import * as prior from './prior.js';
 import * as settings from './settings.js';
 import * as routeTemplates from './routes.js';
 import * as approval from './approval.js';
+import * as notifications from './notify.js';
+import * as network from './network.js';
 import { parseVersion, versionTemplate } from './excel.js';
 import { MAX_FILE_BYTES } from './files.js';
 
@@ -250,6 +252,26 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.post(`${C}/route-templates/:tid/archive`, command((tx, ctx, req) => routeTemplates.archiveTemplate(tx, ctx, param(req, 'tid'))));
   app.put(`${C}/route-rules`, command((tx, ctx, req) => routeTemplates.saveRules(tx, ctx, body(req))));
   app.post(`${C}/route-templates/preview`, async (req) => routeTemplates.previewTemplate(await ctxOf(req), body(req)));
+
+  // Работа с сетью и переписка
+  app.get(`${C}/networks/:nid/contacts`, async (req) => network.listContacts(await ctxOf(req), param(req, 'nid')));
+  app.post(`${C}/networks/:nid/contacts`, command((tx, ctx, req) => network.saveContact(tx, ctx, param(req, 'nid'), null, body(req))));
+  app.put(`${C}/contacts/:cid`, command((tx, ctx, req) => network.saveContact(tx, ctx, null, param(req, 'cid'), body(req))));
+  app.get(`${C}/campaigns/:id/activities`, async (req) => network.listActivities(await ctxOf(req), param(req, 'id')));
+  app.post(`${C}/campaigns/:id/activities`, command((tx, ctx, req) => network.saveActivity(tx, ctx, param(req, 'id'), null, body(req))));
+  app.put(`${C}/campaigns/:id/activities/:aid`, command((tx, ctx, req) => network.saveActivity(tx, ctx, param(req, 'id'), param(req, 'aid'), body(req))));
+  app.get(`${C}/campaigns/:id/comments`, async (req) => network.listComments(await ctxOf(req), param(req, 'id')));
+  app.post(`${C}/campaigns/:id/comments`, command((tx, ctx, req) => network.addComment(tx, ctx, param(req, 'id'), body(req))));
+
+  // Уведомления и почтовый канал
+  app.get(`${C}/notifications`, async (req) => notifications.listNotifications(await ctxOf(req), req.query as { unread?: string }));
+  app.post(`${C}/notifications/read`, command((tx, ctx, req) => notifications.markRead(tx, ctx, body(req))));
+  app.get(`${C}/notification-prefs`, async (req) => notifications.getPrefs(await ctxOf(req)));
+  app.put(`${C}/notification-prefs`, command((tx, ctx, req) => notifications.savePrefs(tx, ctx, body(req))));
+  app.get(`${C}/mail`, async (req) => notifications.getMailSettings(await ctxOf(req)));
+  app.put(`${C}/mail`, command((tx, ctx, req) => notifications.saveMailSettings(tx, ctx, body(req))));
+  app.post(`${C}/mail/test`, command((tx, ctx) => notifications.testEmail(tx, ctx)));
+  app.post(`${C}/mail/:mid/retry`, command((tx, ctx, req) => notifications.retryEmail(tx, ctx, param(req, 'mid'))));
 
   // Документы
   app.get(`${C}/campaigns/:id/documents`, async (req) => {

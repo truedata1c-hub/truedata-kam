@@ -19,6 +19,8 @@
           <button v-if="has('CANCEL')" class="tdBtn danger" @click="cancelDlg = true">Отменить кампанию</button>
           <button v-if="has('EDIT')" class="tdBtn" @click="editDlg = true"><Icon id="edit-05" :size="15" /><span>Изменить</span></button>
           <button v-if="has('START_NEGOTIATION')" class="tdBtn primary" :disabled="busy" @click="move('START_NEGOTIATION')"><span>Начать переговоры</span><Icon id="arrow-right" :size="15" /></button>
+          <button v-if="has('CONFIRM')" class="tdBtn primary" @click="stageDoc = 'CONFIRM'"><Icon id="check-done-01" :size="15" /><span>Подтверждено сетью</span></button>
+          <button v-if="has('FINALIZE')" class="tdBtn primary" @click="stageDoc = 'FINALIZE'"><Icon id="file-05" :size="15" /><span>Финальные условия</span></button>
           <button v-if="has('CLOSE')" class="tdBtn primary" :disabled="busy" @click="move('CLOSE')">Закрыть кампанию</button>
         </div>
       </div>
@@ -27,6 +29,10 @@
           <span class="num"><Icon v-if="i < currentIndex" id="check" :size="12" /><template v-else>{{ i + 1 }}</template></span>
           <span class="txt">{{ STAGE_LABEL[s] }}</span>
         </div>
+      </div>
+      <div v-if="c.confirmation || c.final_terms" class="stageDocs">
+        <span v-if="c.confirmation"><Icon id="check-done-01" :size="14" />Подтверждение сети: <a :href="docUrl(c.confirmation.id)" class="docLink">{{ c.confirmation.file_name }}</a> · {{ fmtDate(c.confirmation.at) }}</span>
+        <span v-if="c.final_terms"><Icon id="file-05" :size="14" />Финальные условия: <a :href="docUrl(c.final_terms.id)" class="docLink">{{ c.final_terms.file_name }}</a> · {{ fmtDate(c.final_terms.at) }}</span>
       </div>
       <div v-if="c.stage === 'CANCELLED'" class="banner error" style="margin-top: 10px"><Icon id="x-circle" :size="15" /><span><b>Кампания отменена.</b> {{ c.cancel_reason }}</span></div>
       <div v-else-if="c.stage === 'CLOSED'" class="banner info" style="margin-top: 10px"><Icon id="check-circle" :size="15" /><span>Кампания закрыта: условия переданы в контроль исполнения.</span></div>
@@ -104,6 +110,8 @@
           </div>
         </div>
 
+        <NetworkWorkPanel :campaign-id="c.id" :network-id="c.network.id" :network-name="c.network.name" @changed="load" />
+
         <DocumentsPanel :campaign-id="c.id" :documents="documents" :can-upload="has('UPLOAD')" @changed="onDocsChanged" />
 
         <div class="panel">
@@ -131,6 +139,7 @@
 
       <div class="stack">
       <ApprovalPanel :campaign-id="c.id" :etag="etag" :view="approval" @changed="onApprovalChanged" />
+      <CommentsPanel :campaign-id="c.id" />
       <div class="panel">
         <div class="panelHead"><div class="panelTitle">История</div></div>
         <div class="panelBody">
@@ -148,6 +157,7 @@
     </div>
 
     <VersionEditor v-if="editorOpen" :campaign-id="c.id" :etag="etag" :title="`${c.network.name} — ${c.title}`" :documents="documents" @close="editorOpen = false" @saved="afterVersion" />
+    <StageDocDialog v-if="stageDoc" :action="stageDoc" :campaign-id="c.id" :etag="etag" :documents="documents" @close="stageDoc = null" @uploaded="loadDocs" @done="afterStageDoc" />
     <EditCampaignDialog v-if="editDlg" :campaign="c" :etag="etag" @close="editDlg = false" @saved="afterSave" />
     <q-dialog v-if="cancelDlg" :model-value="true" persistent @hide="cancelDlg = false">
       <div class="q-card tdDialog narrow">
@@ -183,6 +193,9 @@ import BreakdownTable from '../components/BreakdownTable.vue';
 import VersionEditor from '../components/VersionEditor.vue';
 import DocumentsPanel from '../components/DocumentsPanel.vue';
 import ApprovalPanel from '../components/ApprovalPanel.vue';
+import CommentsPanel from '../components/CommentsPanel.vue';
+import NetworkWorkPanel from '../components/NetworkWorkPanel.vue';
+import StageDocDialog from '../components/StageDocDialog.vue';
 
 const props = defineProps<{ id: string }>();
 const $q = useQuasar();
@@ -200,6 +213,13 @@ const version = ref<Version | null>(null);
 const documents = ref<Doc[]>([]);
 const editorOpen = ref(false);
 const approval = ref<ApprovalView | null>(null);
+const stageDoc = ref<'CONFIRM' | 'FINALIZE' | null>(null);
+const docUrl = (id: string) => api.url(`${base()}/campaigns/${props.id}/documents/${id}/file`);
+async function afterStageDoc(stage: string) {
+  stageDoc.value = null;
+  $q.notify({ type: 'positive', message: `Этап: ${STAGE_LABEL[stage]}` });
+  await Promise.all([load(), loadDocs()]);
+}
 async function loadApproval() {
   approval.value = await api.get<ApprovalView>(`${base()}/campaigns/${props.id}/approval`);
 }
@@ -255,6 +275,7 @@ function eventTitle(e: Campaign['events'][number]) {
   if (e.kind === 'APPROVAL_DECISION') return `${e.payload?.decision === 'REJECT' ? 'Отклонено' : 'Согласовано'}: шаг «${e.payload?.title}»${e.payload?.for_user_name ? ` (за ${e.payload.for_user_name})` : ''}`;
   if (e.kind === 'APPROVAL_WITHDRAWN') return 'Отправка отозвана с согласования';
   if (e.kind === 'VERSION_WITHIN_TOLERANCE') return `Версия ${e.payload?.number} в пределах допусков — согласование сохранено`;
+  if (e.kind === 'ACTIVITY_DONE') return `${e.payload?.kind_label ?? 'Активность'} с сетью`;
   if (e.kind === 'STAGE') return `${STAGE_LABEL[e.from_stage ?? ''] ?? ''} → ${STAGE_LABEL[e.to_stage ?? ''] ?? ''}`;
   return e.kind;
 }

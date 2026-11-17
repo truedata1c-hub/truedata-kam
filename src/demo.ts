@@ -10,12 +10,13 @@ import { periodsFor, type Split } from './periods.js';
 import { versionTemplate } from './excel.js';
 import { filesDir, mimeOf, storeBuffer } from './files.js';
 import { writeSetting } from './settings.js';
+import ExcelJS from 'exceljs';
 import { computeRoute } from './routes.js';
 import { addWorkdays } from './approval.js';
 
 export const DEMO_CODE = 'DEMO';
 /** Версия демо-набора: при её росте стенд пересоздаёт набор при запуске (DEMO_AUTO_UPGRADE). */
-export const DEMO_VERSION = 3;
+export const DEMO_VERSION = 4;
 
 function rng(seed: number) {
   return () => {
@@ -257,6 +258,7 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
     await seedVersions(tx, { clientId, nets, made, brandIds, userIds, typeSplit: Object.fromEntries(TYPES.map((t) => [t.key, t.split])), filesDir: opts.filesDir ?? filesDir() });
     await seedRoutes(tx, { clientId, roleIds, typeIds, userIds, today });
     await seedApprovals(tx, { clientId, made, today });
+    await seedCommunications(tx, { clientId, made, nets, userIds, today, filesDir: opts.filesDir ?? filesDir() });
     await writeSetting(tx, clientId, 'demo_version', DEMO_VERSION);
     return { clientId, users: USERS.length, campaigns };
   });
@@ -266,7 +268,8 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
 async function purgeClient(tx: Tx, clientId: string) {
   await tx.query('alter table kam.audit_event disable trigger audit_event_no_update');
   await tx.query("select set_config('kam.purge', 'on', true)");
-  for (const t of ['approval_step', 'approval', 'route_rule', 'route_template', 'substitution', 'offer_version_document', 'offer_version_brand_note', 'offer_version_cell', 'offer_version', 'document', 'prior_period', 'client_setting', 'campaign_event', 'campaign_legal_entity', 'campaign', 'campaign_counter', 'kam_assignment', 'legal_entity', 'network', 'network_group',
+  await tx.query('update kam.campaign set confirmation_document_id=null, final_document_id=null where client_id=$1', [clientId]);
+  for (const t of ['email_outbox', 'notification', 'notification_pref', 'campaign_comment', 'activity', 'network_contact', 'approval_step', 'approval', 'route_rule', 'route_template', 'substitution', 'offer_version_document', 'offer_version_brand_note', 'offer_version_cell', 'offer_version', 'document', 'prior_period', 'client_setting', 'campaign_event', 'campaign_legal_entity', 'campaign', 'campaign_counter', 'kam_assignment', 'legal_entity', 'network', 'network_group',
     'user_brand', 'brand', 'user_manager', 'user_business_role', 'business_role', 'campaign_type', 'idempotency_request', 'audit_event', 'membership']) {
     await tx.query(`delete from kam.${t} where client_id = $1`, [clientId]);
   }
@@ -530,4 +533,142 @@ async function seedApprovals(tx: Tx, o: { clientId: string; today: string; made:
       if (res) await ev(c.id, 'STAGE', t[3] ?? res.at, res.actor, { from: 'APPROVAL', to: 'APPROVED', comment: 'Все шаги маршрута согласованы.' });
     }
   }
+}
+
+// Контакты, активности, переписка, подтверждения сети и уведомления демо-набора ------------
+
+const FIRST = ['Андрей', 'Марина', 'Олег', 'Светлана', 'Николай', 'Юлия', 'Павел', 'Ирина', 'Артём', 'Екатерина', 'Виктор', 'Анастасия'];
+const LAST = ['Белов', 'Громова', 'Захаров', 'Киселёва', 'Лаптев', 'Миронова', 'Орлов', 'Панова', 'Рябов', 'Сафонова', 'Тихонов', 'Фомина'];
+const POSITIONS = ['Директор по закупкам', 'Категорийный менеджер', 'Коммерческий директор', 'Руководитель маркетинга', 'Менеджер по работе с поставщиками'];
+const PURPOSES = ['Обсудить ставку за выкладку и маркетинговый бюджет', 'Согласовать список брендов в программе', 'Обсудить встречное предложение сети', 'Уточнить план закупок по кварталам'];
+const OUTCOMES = [
+  'Сеть просит повысить ставку по лидерам продаж; готовы обсуждать при росте плана закупок.',
+  'Договорились о ступенчатой шкале за выполнение плана; ждём расчёт от сети.',
+  'Сеть согласна с перечнем брендов, вопрос по срокам выплат остаётся открытым.',
+  'Получили встречное предложение по почте, передал на расчёт.',
+  'Обсудили итоги прошлого года: невыполнение по двум брендам, сеть готова компенсировать выкладкой.',
+];
+const COMMENTS = [
+  'Сеть настаивает на ставке выше прошлогодней — прошу посмотреть расчёт до встречи.',
+  'По двум брендам план прошлого года не выполнен, рост инвестиций обоснован новыми аптеками.',
+  'Подготовил сравнение с прошлым годом, приложил в документы.',
+  'Ок, жду обновлённую версию после встречи с сетью.',
+];
+
+async function seedCommunications(tx: Tx, o: {
+  clientId: string; today: string; filesDir: string;
+  made: { id: string; net: { id: string; name: string }; stage: string; owner: string; times: Date[] }[];
+  nets: { id: string; name: string; kam: string }[]; userIds: Record<string, string>;
+}) {
+  const r = rng(20271215);
+  const pick = <T>(a: readonly T[]) => a[Math.floor(r() * a.length)]!;
+  const now = Date.parse(o.today + 'T12:00:00Z');
+  const contacts = new Map<string, string[]>();
+  for (const n of o.nets) {
+    const ids: string[] = [];
+    const count = 2 + Math.floor(r() * 2);
+    for (let i = 0; i < count; i++) {
+      const id = randomUUID();
+      const female = r() < 0.5;
+      const first = pick(FIRST.filter((_, k) => (k % 2 === 1) === female));
+      const last = pick(LAST.filter((_, k) => (k % 2 === 1) === female));
+      await tx.query(
+        `insert into kam.network_contact(client_id, id, network_id, name, position, phone, email, is_key, created_by, created_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+        [o.clientId, id, n.id, `${first} ${last}`, POSITIONS[(i + Math.floor(r() * 2)) % POSITIONS.length], `+7 9${Math.floor(10 + r() * 89)} ${Math.floor(100 + r() * 899)}-${Math.floor(10 + r() * 89)}-${Math.floor(10 + r() * 89)}`,
+          '', i === 0, o.userIds[n.kam], new Date('2025-06-01T09:00:00Z')]);
+      ids.push(id);
+    }
+    contacts.set(n.id, ids);
+  }
+  const ev = (campaignId: string, kind: string, at: Date, actor: string, comment: string | null, payload: unknown) =>
+    tx.query('insert into kam.campaign_event(client_id, id, campaign_id, kind, comment, payload, actor, at) values ($1,$2,$3,$4,$5,$6,$7,$8)',
+      [o.clientId, randomUUID(), campaignId, kind, comment, JSON.stringify(payload), actor, at]);
+  const active = ['NEGOTIATION', 'APPROVAL', 'APPROVED', 'CONFIRMED', 'FINAL', 'CLOSED'];
+  const KL: Record<string, string> = { MEETING: 'Встреча', CALL: 'Звонок', EMAIL: 'Письмо' };
+  for (const c of o.made) {
+    if (!active.includes(c.stage) && c.stage !== 'CANCELLED') continue;
+    const cs = contacts.get(c.net.id) ?? [];
+    const start = c.times[1]?.getTime() ?? c.times[0]!.getTime();
+    const end = Math.min(now, (c.times[3] ?? new Date(now)).getTime());
+    const done = 1 + Math.floor(r() * 3);
+    for (let i = 0; i < done; i++) {
+      const at = new Date(start + ((end - start) * (i + 1)) / (done + 1));
+      const kind = pick(['MEETING', 'CALL', 'CALL', 'EMAIL']);
+      const outcome = pick(OUTCOMES);
+      await tx.query(
+        `insert into kam.activity(client_id, id, campaign_id, kind, at, contact_id, status, purpose, outcome, created_by, created_at, done_by, done_at)
+         values ($1,$2,$3,$4,$5,$6,'DONE',$7,$8,$9,$5,$9,$5)`, [o.clientId, randomUUID(), c.id, kind, at, pick(cs), pick(PURPOSES), outcome, c.owner]);
+      await ev(c.id, 'ACTIVITY_DONE', at, c.owner, outcome, { kind, kind_label: KL[kind], at: at.toISOString() });
+    }
+    if (['NEGOTIATION', 'APPROVAL'].includes(c.stage) && r() < 0.6) {
+      const at = new Date(now + Math.floor(1 + r() * 10) * 86400_000 + 3600_000 * Math.floor(r() * 6));
+      await tx.query(`insert into kam.activity(client_id, id, campaign_id, kind, at, contact_id, status, purpose, created_by) values ($1,$2,$3,'MEETING',$4,$5,'PLANNED',$6,$7)`,
+        [o.clientId, randomUUID(), c.id, at, cs[0] ?? null, pick(PURPOSES), c.owner]);
+    }
+  }
+
+  // Переписка: по кампаниям на согласовании — КАМ и исполнитель шага.
+  const { rows: inApproval } = await tx.query<{ campaign_id: string; candidates: string[]; activated_at: Date; owner_id: string }>(
+    `select s.campaign_id, s.candidates, s.activated_at, c.owner_id from kam.approval_step s join kam.campaign c on c.client_id = s.client_id and c.id = s.campaign_id
+      where s.client_id=$1 and s.status='ACTIVE'`, [o.clientId]);
+  const names = new Map((await tx.query<{ id: string; display_name: string }>('select id, display_name from kam.app_user where id = any($1::uuid[])', [Object.values(o.userIds)])).rows.map((x) => [x.id, x.display_name]));
+  for (const s of inApproval) {
+    const approver = s.candidates[0]!;
+    const t0 = new Date(s.activated_at).getTime();
+    await tx.query('insert into kam.campaign_comment(client_id, id, campaign_id, author_id, body, mentions, created_at) values ($1,$2,$3,$4,$5,$6,$7)',
+      [o.clientId, randomUUID(), s.campaign_id, s.owner_id, `@${names.get(approver)} ${pick(COMMENTS.slice(0, 3))}`, [approver], new Date(t0 + 1800_000)]);
+    if (r() < 0.5) {
+      await tx.query('insert into kam.campaign_comment(client_id, id, campaign_id, author_id, body, mentions, created_at) values ($1,$2,$3,$4,$5,$6,$7)',
+        [o.clientId, randomUUID(), s.campaign_id, approver, COMMENTS[3], [], new Date(t0 + 5 * 3600_000)]);
+    }
+  }
+
+  // Подтверждение сетью и финальные условия — документы этапов 5 и 6.
+  for (const c of o.made.filter((x) => ['CONFIRMED', 'FINAL', 'CLOSED'].includes(x.stage))) {
+    const docs: [string, string, string, Date][] = [['NETWORK_CONFIRMATION', `${c.net.name} — подтверждение условий.xlsx`, 'confirmation_document_id', c.times[4] ?? c.times[c.times.length - 1]!]];
+    if (c.stage !== 'CONFIRMED') docs.push(['FINAL_TERMS', `${c.net.name} — финальные условия.xlsx`, 'final_document_id', c.times[5] ?? c.times[c.times.length - 1]!]);
+    for (const [kind, name, col, at] of docs) {
+      const wb = new ExcelJS.Workbook();
+      const ws = wb.addWorksheet(kind === 'FINAL_TERMS' ? 'Финальные условия' : 'Подтверждение');
+      ws.addRow([kind === 'FINAL_TERMS' ? 'Финальные условия, согласованные с сетью' : 'Сеть подтверждает условия, согласованные внутри компании']);
+      ws.addRow(['Сеть', c.net.name]);
+      ws.addRow(['Дата', at.toISOString().slice(0, 10)]);
+      const stored = await storeBuffer(o.filesDir, o.clientId, Buffer.from(await wb.xlsx.writeBuffer()));
+      const id = randomUUID();
+      await tx.query(
+        `insert into kam.document(client_id, id, campaign_id, kind, file_name, mime, size_bytes, sha256, stage, uploaded_by, uploaded_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [o.clientId, id, c.id, kind, name, mimeOf(name), stored.size, stored.sha256, kind === 'FINAL_TERMS' ? 'CONFIRMED' : 'APPROVED', c.owner, at]);
+      await tx.query(`update kam.campaign set ${col} = $3, ${col === 'final_document_id' ? 'finalized_at' : 'confirmed_at'} = $4 where client_id=$1 and id=$2`, [o.clientId, c.id, id, at]);
+    }
+  }
+
+  // Центр уведомлений: шаги, которые ждут решения, и возвраты на доработку.
+  const note = async (user: string, kind: string, campaignId: string, title: string, body: string, at: Date, read: boolean, actor: string | null) => {
+    const id = randomUUID();
+    await tx.query('insert into kam.notification(client_id, id, user_id, kind, campaign_id, title, body, actor_id, created_at, read_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)',
+      [o.clientId, id, user, kind, campaignId, title, body, actor, at, read ? new Date(at.getTime() + 3600_000) : null]);
+    const email = (await tx.query<{ email: string }>('select email from kam.app_user where id=$1', [user])).rows[0]!.email;
+    await tx.query(`insert into kam.email_outbox(client_id, id, notification_id, user_id, to_email, subject, body, status, created_at) values ($1,$2,$3,$4,$5,$6,$7,'NO_CHANNEL',$8)`,
+      [o.clientId, randomUUID(), id, user, email, `PharmaCheck · ${title}`, `${title}\n${body}`, at]);
+  };
+  const { rows: steps } = await tx.query<{ campaign_id: string; title: string; candidates: string[]; activated_at: Date; due_date: string; label: string; owner_id: string }>(
+    `select s.campaign_id, s.title, s.candidates, s.activated_at, s.due_date::text due_date, n.name || ' — ' || c.title label, c.owner_id
+       from kam.approval_step s join kam.campaign c on c.client_id = s.client_id and c.id = s.campaign_id join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+      where s.client_id=$1 and s.status='ACTIVE'`, [o.clientId]);
+  for (const s of steps) {
+    for (const u of s.candidates) {
+      await note(u, 'STEP_ASSIGNED', s.campaign_id, `Нужно ваше решение: ${s.label}`, `Шаг «${s.title}», срок — ${s.due_date.split('-').reverse().join('.')}.`, new Date(s.activated_at), false, s.owner_id);
+      await note(u, 'MENTION', s.campaign_id, `Вас упомянули в переписке: ${s.label}`, `${names.get(s.owner_id)}: посмотрите расчёт до решения.`, new Date(new Date(s.activated_at).getTime() + 1800_000), false, s.owner_id);
+    }
+  }
+  const { rows: rejected } = await tx.query<{ campaign_id: string; owner_id: string; label: string; decided_by: string; title: string; decision_comment: string; decided_at: Date }>(
+    `select distinct on (a.campaign_id) a.campaign_id, c.owner_id, n.name || ' — ' || c.title label, s.decided_by, s.title, s.decision_comment, s.decided_at
+       from kam.approval a join kam.approval_step s on s.client_id = a.client_id and s.approval_id = a.id and s.status='REJECTED'
+       join kam.campaign c on c.client_id = a.client_id and c.id = a.campaign_id join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+      where a.client_id=$1 and a.status='REJECTED' order by a.campaign_id, a.round desc`, [o.clientId]);
+  for (const x of rejected) {
+    await note(x.owner_id, 'RETURNED', x.campaign_id, `Возвращено на доработку: ${x.label}`, `${names.get(x.decided_by)}, шаг «${x.title}»: ${x.decision_comment}`, new Date(x.decided_at), r() < 0.6, x.decided_by);
+  }
+  // Просроченные шаги и контрольные даты, по которым демо-набор уже «уведомил», не дублируются планировщиком.
+  await tx.query("update kam.approval_step set reminded_at = now(), overdue_notified_at = case when due_date < current_date then now() end where client_id=$1 and status='ACTIVE' and due_date <= current_date", [o.clientId]);
 }

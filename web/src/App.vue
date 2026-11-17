@@ -13,6 +13,7 @@
       </div>
       <div class="spacer" />
       <TdSelect v-if="state.me.companies.length > 1" :model-value="state.companyId" :options="companyOptions" aria-label="Компания" @update:model-value="(v: unknown) => switchCompany(v as string)" />
+      <NotificationBell v-if="company" />
     </div>
     <div v-if="adminPage" class="tdTabs" style="margin-bottom: 14px" role="tablist" aria-label="Настройки">
       <button v-for="a in adminNav" :key="a.page" role="tab" :class="{ active: state.page === a.page }" @click="go(a.page)">{{ a.label }}</button>
@@ -80,6 +81,7 @@
         <div class="row items-center no-wrap" style="gap: 10px">
           <TdSelect v-if="state.me.companies.length > 1" :model-value="state.companyId" :options="companyOptions" aria-label="Компания" @update:model-value="(v: unknown) => switchCompany(v as string)" />
           <span v-else-if="company" class="note">{{ company.name }}</span>
+          <NotificationBell v-if="company" />
           <button class="avatar" :aria-label="`Профиль: ${state.me.display_name}`">
             {{ initials(state.me.display_name) }}
             <q-menu anchor="bottom right" self="top right" :offset="[0, 6]">
@@ -131,6 +133,7 @@ import SubstitutionsPage from './pages/SubstitutionsPage.vue';
 import PasswordDialog from './components/PasswordDialog.vue';
 import Icon from './components/Icon.vue';
 import TdSelect from './components/TdSelect.vue';
+import NotificationBell from './components/NotificationBell.vue';
 
 const $q = useQuasar();
 const booting = ref(true);

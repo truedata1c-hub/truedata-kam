@@ -122,3 +122,7 @@ a.tdBtn { text-decoration: none; }
 .tdBtn.dangerSolid:hover { filter: brightness(0.95); }
 .tdBtn.dangerSolid:disabled { opacity: 0.5; }
 .navBadge { margin-left: auto; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--purple); color: #fff; font-size: 11px; font-weight: 600; display: inline-grid; place-items: center; }
+.stageDocs { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 10px; font-size: 12px; color: var(--text-2); }
+.stageDocs > span { display: inline-flex; gap: 6px; align-items: center; }
+.docLink { color: var(--ink); font-weight: 500; }
+.docLink:hover { color: var(--purple); }

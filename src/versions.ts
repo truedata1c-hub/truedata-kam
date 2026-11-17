@@ -7,7 +7,7 @@ import { type Ctx, campaignVisibility, canEditFor } from './access.js';
 import { type CommandResult, audit, bumpCampaign, campaignEtag, campaignEvent, isUuid, lockCampaign } from './commands.js';
 import { type Period, type Split, periodsFor, quartersOf, yearBack } from './periods.js';
 import { thresholds, type Thresholds } from './settings.js';
-import { checkTolerance } from './approval.js';
+import { checkTolerance, notifyVersionChanged } from './approval.js';
 
 const VERSION_STAGES = ['PREPARATION', 'NEGOTIATION', 'APPROVED'];
 const MAX_AMOUNT = 1e12;
@@ -133,6 +133,7 @@ export async function createVersion(tx: Tx, ctx: Ctx, campaignId: string, ifMatc
       await campaignEvent(tx, ctx, campaignId, 'STAGE', { from: 'APPROVED', to: 'NEGOTIATION', comment: tolerance.reason });
       stage = 'NEGOTIATION';
     }
+    await notifyVersionChanged(tx, ctx, campaignId, number, tolerance.reason);
   }
   const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'version', entityId: id, action: 'CREATE', after: { campaign_id: campaignId, number, total_investment: totalInv, total_turnover: totalTurn, brands: new Set(cells.map((x) => x.brand_id)).size } });

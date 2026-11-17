@@ -6,6 +6,7 @@ import { ApiError, forbidden, invalid, notFound, required } from './errors.js';
 import { type Ctx, campaignVisibility, canEditFor, requirePermission } from './access.js';
 import { type CommandResult, audit, bumpCampaign, campaignEtag, campaignEvent, isUuid, lockCampaign } from './commands.js';
 import { computeRoute, fmtMoney } from './routes.js';
+import { notify } from './notify.js';
 
 type Q = Pick<Tx, 'query'>;
 
@@ -63,6 +64,36 @@ export async function closeApproval(tx: Tx, clientId: string, campaignId: string
   return a;
 }
 
+// Уведомления ----------------------------------------------------------------------
+
+async function campaignLabel(q: Q, clientId: string, id: string) {
+  const r = (await q.query<{ title: string; network: string; owner_id: string }>(
+    'select c.title, n.name network, c.owner_id from kam.campaign c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2', [clientId, id])).rows[0]!;
+  return { ...r, label: `${r.network} — ${r.title}` };
+}
+
+/** Исполнители шага и их заместители на сегодня. */
+async function withDeputies(q: Q, clientId: string, users: string[]) {
+  const { rows } = await q.query<{ d: string }>('select deputy_id d from kam.substitution where client_id=$1 and user_id = any($2::uuid[]) and valid @> current_date', [clientId, users]);
+  return [...users, ...rows.map((r) => r.d)];
+}
+
+async function notifyStep(q: Q, ctx: Ctx, campaignId: string, step: { title: string; candidates: string[]; due: string | null }) {
+  const c = await campaignLabel(q, ctx.clientId, campaignId);
+  await notify(q, ctx.clientId, { kind: 'STEP_ASSIGNED', users: await withDeputies(q, ctx.clientId, step.candidates), campaignId, actorId: ctx.principal.userId,
+    title: `Нужно ваше решение: ${c.label}`, body: `Шаг «${step.title}»${step.due ? `, срок — ${step.due.split('-').reverse().join('.')}` : ''}.` });
+}
+
+/** Новая версия согласованной кампании: уведомить согласовавших. */
+export async function notifyVersionChanged(q: Q, ctx: Ctx, campaignId: string, number: number, reason: string) {
+  const { rows } = await q.query<{ u: string }>(
+    `select distinct s.decided_by u from kam.approval a join kam.approval_step s on s.client_id = a.client_id and s.approval_id = a.id and s.status='APPROVED'
+      where a.client_id=$1 and a.campaign_id=$2 and a.round = (select max(round) from kam.approval where client_id=$1 and campaign_id=$2 and status in ('APPROVED','SUPERSEDED'))`,
+    [ctx.clientId, campaignId]);
+  const c = await campaignLabel(q, ctx.clientId, campaignId);
+  await notify(q, ctx.clientId, { kind: 'VERSION_CHANGED', users: rows.map((r) => r.u), campaignId, actorId: ctx.principal.userId, title: `Версия ${number}: ${c.label}`, body: reason });
+}
+
 // Отправка --------------------------------------------------------------------
 
 export async function submit(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: string | undefined, b: Record<string, unknown>): Promise<CommandResult> {
@@ -103,6 +134,8 @@ export async function submit(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
       [ctx.clientId, randomUUID(), approvalId, campaignId, s.position, s.title, s.assignee_rule, s.condition_text, status, s.skip_reason,
         s.candidates.map((x) => x.id), s.assign_note, s.deadline_days, status === 'ACTIVE' ? addWorkdays(day, s.deadline_days) : null]);
   }
+  const first = included[0];
+  if (first) await notifyStep(tx, ctx, campaignId, { title: first.title, candidates: first.candidates.map((x) => x.id), due: addWorkdays(day, first.deadline_days) });
   const to = done ? 'APPROVED' : 'APPROVAL';
   await tx.query('update kam.campaign set stage=$3, stage_changed_at=now() where client_id=$1 and id=$2', [ctx.clientId, campaignId, to]);
   await campaignEvent(tx, ctx, campaignId, 'APPROVAL_SUBMITTED', { comment: comment || null, payload: { round, version: v.number, template: route.template.name, steps: included.length, skipped: route.steps.length - included.length } });
@@ -169,16 +202,25 @@ export async function decide(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
     await tx.query("update kam.approval_step set status='CANCELLED' where client_id=$1 and approval_id=$2 and status='WAITING'", [ctx.clientId, a.id]);
     stage = 'NEGOTIATION';
     await setStage(tx, ctx, campaignId, 'APPROVAL', stage, `Отклонено на шаге «${step.title}»: ${comment}`);
+    const c = await campaignLabel(tx, ctx.clientId, campaignId);
+    await notify(tx, ctx.clientId, { kind: 'RETURNED', users: [c.owner_id, a.submitted_by], campaignId, actorId: ctx.principal.userId,
+      title: `Возвращено на доработку: ${c.label}`, body: `${ctx.principal.displayName}, шаг «${step.title}»: ${comment}` });
   } else {
-    const next = (await tx.query<{ id: string; deadline_days: number }>(
-      "select id, deadline_days from kam.approval_step where client_id=$1 and approval_id=$2 and status='WAITING' order by position limit 1", [ctx.clientId, a.id])).rows[0];
+    const next = (await tx.query<{ id: string; deadline_days: number; title: string; candidates: string[] }>(
+      "select id, deadline_days, title, candidates from kam.approval_step where client_id=$1 and approval_id=$2 and status='WAITING' order by position limit 1", [ctx.clientId, a.id])).rows[0];
+    const c = await campaignLabel(tx, ctx.clientId, campaignId);
     if (next) {
-      await tx.query("update kam.approval_step set status='ACTIVE', activated_at=now(), due_date=$3 where client_id=$1 and id=$2",
-        [ctx.clientId, next.id, addWorkdays(await today(tx), next.deadline_days)]);
+      const due = addWorkdays(await today(tx), next.deadline_days);
+      await tx.query("update kam.approval_step set status='ACTIVE', activated_at=now(), due_date=$3 where client_id=$1 and id=$2", [ctx.clientId, next.id, due]);
+      await notifyStep(tx, ctx, campaignId, { title: next.title, candidates: next.candidates, due });
+      await notify(tx, ctx.clientId, { kind: 'DECISION', users: [c.owner_id, a.submitted_by], campaignId, actorId: ctx.principal.userId,
+        title: `Шаг «${step.title}» согласован: ${c.label}`, body: `${ctx.principal.displayName}${forName ? ` за ${forName}` : ''}${comment ? `: ${comment}` : ''}. Следующий шаг — «${next.title}».` });
     } else {
       await tx.query("update kam.approval set status='APPROVED', finished_at=now() where client_id=$1 and id=$2", [ctx.clientId, a.id]);
       stage = 'APPROVED';
       await setStage(tx, ctx, campaignId, 'APPROVAL', stage, 'Все шаги маршрута согласованы.');
+      await notify(tx, ctx.clientId, { kind: 'APPROVED', users: [c.owner_id, a.submitted_by], campaignId, actorId: ctx.principal.userId,
+        title: `Согласовано внутри: ${c.label}`, body: 'Все шаги маршрута пройдены. Следующий этап — подтверждение сетью.' });
     }
   }
   const rev = await bumpCampaign(tx, ctx, campaignId);

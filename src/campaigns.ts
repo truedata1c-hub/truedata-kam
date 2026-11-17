@@ -7,6 +7,7 @@ import { ApiError, forbidden, invalid, notFound, required } from './errors.js';
 import { type Ctx, campaignVisibility, canEditFor, isAssigned } from './access.js';
 import { type CommandResult, audit, bumpCampaign, campaignEtag, campaignEvent, isUuid, lockCampaign } from './commands.js';
 import { closeApproval } from './approval.js';
+import { notify } from './notify.js';
 
 export const STAGES = ['PREPARATION', 'NEGOTIATION', 'APPROVAL', 'APPROVED', 'CONFIRMED', 'FINAL', 'CANCELLED', 'CLOSED'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -127,8 +128,15 @@ function actionsFor(ctx: Ctx, c: { stage: Stage; owner_id: string }) {
   if (edit && c.stage === 'FINAL') a.push('CLOSE');
   if (edit && (EDITABLE_STAGES.includes(c.stage) || c.stage === 'APPROVED')) a.push('NEW_VERSION');
   if (edit && c.stage === 'NEGOTIATION') a.push('SUBMIT');
+  if (edit && c.stage === 'APPROVED') a.push('CONFIRM');
+  if (edit && c.stage === 'CONFIRMED') a.push('FINALIZE');
   if (edit && c.stage !== 'CANCELLED' && c.stage !== 'CLOSED') a.push('UPLOAD');
   return a;
+}
+
+async function docRef(ctx: Ctx, id: string, at: string) {
+  const d = (await ctx.db.query<{ id: string; file_name: string; kind: string; mime: string }>('select id, file_name, kind, mime from kam.document where client_id=$1 and id=$2', [ctx.clientId, id])).rows[0];
+  return d ? { ...d, at } : null;
 }
 
 export async function getCampaign(ctx: Ctx, id: string) {
@@ -153,6 +161,8 @@ export async function getCampaign(ctx: Ctx, id: string) {
       owner: { id: c.owner_id, name: c.owner_name, email: c.owner_email },
       created_by: c.created_by_name, created_at: c.created_at, updated_at: c.updated_at, revision: c.revision,
       legal_entities: entities, events, actions: actionsFor(ctx, c),
+      confirmation: c.confirmation_document_id ? await docRef(ctx, c.confirmation_document_id, c.confirmed_at) : null,
+      final_terms: c.final_document_id ? await docRef(ctx, c.final_document_id, c.finalized_at) : null,
     },
     etag: campaignEtag(c.id, c.revision),
   };
@@ -271,20 +281,36 @@ export async function updateCampaign(tx: Tx, ctx: Ctx, id: string, ifMatch: stri
   return { status: 200, body: { id, revision: rev, warnings }, etag: campaignEtag(id, rev) };
 }
 
-export async function transition(tx: Tx, ctx: Ctx, id: string, ifMatch: string | undefined, b: { action?: unknown; comment?: unknown }): Promise<CommandResult> {
+const STAGE_DOCS: Record<string, { kinds: string[]; code: string; message: string }> = {
+  CONFIRM: { kinds: ['NETWORK_CONFIRMATION', 'SIGNED_CONTRACT'], code: 'CONFIRMATION_DOCUMENT_REQUIRED', message: 'Приложите подтверждение сети: документ типа «Подтверждение сети» или «Подписанный договор».' },
+  FINALIZE: { kinds: ['FINAL_TERMS', 'SIGNED_CONTRACT'], code: 'FINAL_DOCUMENT_REQUIRED', message: 'Приложите финальный файл условий: документ типа «Финальные условия» или «Подписанный договор».' },
+};
+
+export async function transition(tx: Tx, ctx: Ctx, id: string, ifMatch: string | undefined, b: { action?: unknown; comment?: unknown; document_id?: unknown }): Promise<CommandResult> {
   const locked = await lockCampaign(tx, ctx, id, ifMatch);
   await loadVisible(ctx, id, tx);
   const action = b.action;
   const comment = typeof b.comment === 'string' ? b.comment.trim() : '';
   if (comment.length > 2000) throw invalid('comment', 'Не длиннее 2000 символов.');
   const allowed = actionsFor(ctx, { stage: locked.stage as Stage, owner_id: locked.owner_id });
-  if (typeof action !== 'string' || !['START_NEGOTIATION', 'CANCEL', 'CLOSE'].includes(action)) throw invalid('action', 'Неизвестное действие.');
+  if (typeof action !== 'string' || !['START_NEGOTIATION', 'CANCEL', 'CLOSE', 'CONFIRM', 'FINALIZE'].includes(action)) throw invalid('action', 'Неизвестное действие.');
   if (!allowed.includes(action)) {
     if (!canEditFor(ctx, locked.owner_id)) throw forbidden();
     throw new ApiError(409, 'TRANSITION_NOT_ALLOWED', 'Это действие недоступно на текущем этапе.', { stage: locked.stage });
   }
   let to: Stage;
+  let doc: { id: string; file_name: string } | undefined;
+  if (action === 'CONFIRM' || action === 'FINALIZE') {
+    const rule = STAGE_DOCS[action]!;
+    if (!isUuid(b.document_id)) throw new ApiError(422, rule.code, rule.message, {}, 'document_id');
+    doc = (await tx.query<{ id: string; file_name: string }>(
+      'select id, file_name from kam.document where client_id=$1 and campaign_id=$2 and id=$3 and archived_at is null and kind = any($4::text[])',
+      [ctx.clientId, id, b.document_id, rule.kinds])).rows[0];
+    if (!doc) throw new ApiError(422, rule.code, rule.message, {}, 'document_id');
+  }
   if (action === 'START_NEGOTIATION') to = 'NEGOTIATION';
+  else if (action === 'CONFIRM') to = 'CONFIRMED';
+  else if (action === 'FINALIZE') to = 'FINAL';
   else if (action === 'CLOSE') to = 'CLOSED';
   else {
     if (!comment) throw required('comment', 'Укажите причину отмены.');
@@ -294,8 +320,21 @@ export async function transition(tx: Tx, ctx: Ctx, id: string, ifMatch: string |
   await tx.query(
     'update kam.campaign set stage=$3, stage_changed_at=now(), cancel_reason=$4 where client_id=$1 and id=$2',
     [ctx.clientId, id, to, to === 'CANCELLED' ? comment : null]);
+  if (action === 'CONFIRM') await tx.query('update kam.campaign set confirmation_document_id=$3, confirmed_at=now() where client_id=$1 and id=$2', [ctx.clientId, id, doc!.id]);
+  if (action === 'FINALIZE') await tx.query('update kam.campaign set final_document_id=$3, finalized_at=now() where client_id=$1 and id=$2', [ctx.clientId, id, doc!.id]);
   const rev = await bumpCampaign(tx, ctx, id);
-  await campaignEvent(tx, ctx, id, 'STAGE', { from: locked.stage, to, comment: comment || null });
+  await campaignEvent(tx, ctx, id, 'STAGE', { from: locked.stage, to, comment: comment || null, payload: doc ? { document_id: doc.id, file_name: doc.file_name } : undefined });
+  if (action === 'CONFIRM') {
+    // Сеть подтвердила условия: узнают согласовавшие и руководитель ответственного.
+    const { rows } = await tx.query<{ u: string; title: string; network: string }>(
+      `select distinct s.decided_by u, c.title, n.name network from kam.approval a join kam.approval_step s on s.client_id = a.client_id and s.approval_id = a.id and s.status = 'APPROVED'
+         join kam.campaign c on c.client_id = a.client_id and c.id = a.campaign_id join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+        where a.client_id=$1 and a.campaign_id=$2 and a.status='APPROVED'`, [ctx.clientId, id]);
+    const mgr = (await tx.query<{ m: string }>('select manager_id m from kam.user_manager where client_id=$1 and user_id=$2 and valid @> current_date', [ctx.clientId, locked.owner_id])).rows[0]?.m;
+    const names = (await tx.query<{ title: string; network: string }>('select c.title, n.name network from kam.campaign c join kam.network n on n.client_id=c.client_id and n.id=c.network_id where c.client_id=$1 and c.id=$2', [ctx.clientId, id])).rows[0]!;
+    await notify(tx, ctx.clientId, { kind: 'CONFIRMED', users: [...rows.map((r) => r.u), mgr], campaignId: id, actorId: ctx.principal.userId,
+      title: `Сеть подтвердила условия: ${names.network} — ${names.title}`, body: `Подтверждение: ${doc!.file_name}` });
+  }
   await audit(tx, ctx, { entityType: 'campaign', entityId: id, action, before: { stage: locked.stage }, after: { stage: to }, reason: comment || null });
   return { status: 200, body: { id, stage: to, revision: rev }, etag: campaignEtag(id, rev) };
 }

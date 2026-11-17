@@ -4,6 +4,7 @@ import { buildApp } from './app.js';
 import { createPool, migrate } from './db.js';
 import { ssoConfigFromEnv } from './sso.js';
 import { upgradeDemo } from './demo.js';
+import { processOutbox, runSchedule } from './notify.js';
 
 const url = process.env.DATABASE_URL;
 if (!url) {
@@ -38,7 +39,24 @@ if (process.env.DEMO_AUTO_UPGRADE === '1' && process.env.KAM_DEMO_PASSWORD) {
     .catch((e) => app.log.error(e, 'demo upgrade failed'));
 }
 
+// Фоновые задачи: очередь писем — раз в 30 секунд, напоминания и просрочки — раз в 5 минут.
+let busyMail = false, busySchedule = false;
+const mailTimer = setInterval(() => {
+  if (busyMail) return;
+  busyMail = true;
+  processOutbox(db).then((r) => { if (r.sent || r.failed) app.log.info(r, 'email outbox'); }).catch((e) => app.log.error(e, 'email outbox failed')).finally(() => { busyMail = false; });
+}, 30_000);
+const scheduleTick = () => {
+  if (busySchedule) return;
+  busySchedule = true;
+  runSchedule(db).then((r) => { if (r.reminders || r.overdue || r.control) app.log.info(r, 'notifications schedule'); }).catch((e) => app.log.error(e, 'schedule failed')).finally(() => { busySchedule = false; });
+};
+const scheduleTimer = setInterval(scheduleTick, 5 * 60_000);
+setTimeout(scheduleTick, 20_000);
+
 const shutdown = async () => {
+  clearInterval(mailTimer);
+  clearInterval(scheduleTimer);
   await app.close();
   await db.end();
   process.exit(0);

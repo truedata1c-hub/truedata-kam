@@ -26,8 +26,8 @@ const MAX_STEPS = 10;
 
 // Справочники клиента для проверок и подписей --------------------------------
 
-interface Approver { id: string; name: string; roles: Set<string>; approve: boolean; scopes: Set<string> }
-interface Dir {
+export interface Approver { id: string; name: string; roles: Set<string>; approve: boolean; scopes: Set<string> }
+export interface Dir {
   roles: Map<string, { name: string; approve: boolean; archived: boolean }>;
   users: Map<string, Approver>;
   managerOf: Map<string, string>;
@@ -35,7 +35,7 @@ interface Dir {
   assigned: Map<string, Set<string>>; // сеть → закреплённые пользователи
 }
 
-async function directory(q: Q, clientId: string): Promise<Dir> {
+export async function directory(q: Q, clientId: string): Promise<Dir> {
   const roles = new Map((await q.query<{ id: string; name: string; permissions: string[]; archived: boolean }>(
     'select id, name, permissions, archived from kam.business_role where client_id=$1', [clientId])).rows
     .map((r) => [r.id, { name: r.name, approve: r.permissions.includes('APPROVE'), archived: r.archived }]));
@@ -203,7 +203,7 @@ function evaluate(c: Condition, m: VersionMetrics | null, camp: RouteCampaign, d
 }
 
 /** Видит ли пользователь кампанию по своей роли (уточнение «с доступом к сети»). */
-function canSee(u: Approver, camp: RouteCampaign, d: Dir): boolean {
+export function canSee(u: Approver, camp: RouteCampaign, d: Dir): boolean {
   if (u.scopes.has('ALL') || u.scopes.has('BRANDS')) return true;
   const net = d.assigned.get(camp.network_id) ?? new Set<string>();
   const team = new Set<string>([u.id]);

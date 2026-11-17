@@ -1,5 +1,5 @@
 <template>
-  <div style="max-width: 720px">
+  <div style="max-width: 980px">
     <div class="pageHead">
       <div style="flex: 1">
         <div class="pageTitle">Настройки</div>
@@ -26,10 +26,7 @@
       <div v-if="err.message" class="formError" role="alert">{{ err.message }}</div>
       <div class="toolbar" style="margin-top: 14px"><button class="tdBtn primary" :disabled="busy" @click="save">Сохранить</button></div>
     </div>
-    <div class="panel" style="padding: 16px; margin-top: 12px">
-      <div class="panelTitle">Уведомления по почте</div>
-      <div class="note" style="margin-top: 4px">Канал писем появится вместе с уведомлениями (шаг 4): события будут копиться в очереди и отправятся после подключения почтового сервера.</div>
-    </div>
+    <MailSettings />
   </div>
 </template>
 
@@ -39,6 +36,7 @@ import { useQuasar } from 'quasar';
 import { api } from '../api';
 import { base, announceTitle } from '../store';
 import { useCommand } from '../command';
+import MailSettings from '../components/MailSettings.vue';
 
 interface T { investment_growth_pct: number; execution_below_pct: number; roi_below_prior: boolean }
 const $q = useQuasar();

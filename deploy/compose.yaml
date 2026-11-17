@@ -35,6 +35,7 @@ services:
       SECURE_COOKIES: "true"
       TRUST_PROXY: "1"
       FILES_DIR: /data/files
+      APP_URL: ${APP_URL:-https://kam.demo.truedata.tech}
       # Сквозной вход: открытый ключ платформы (PEM, переводы строк как \n), издатель и адресат токена.
       SSO_PUBLIC_KEY: ${SSO_PUBLIC_KEY:-}
       SSO_ISSUER: ${SSO_ISSUER:-truedata-platform}

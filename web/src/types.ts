@@ -1,6 +1,8 @@
 // Типы ответов API, общие для страниц и диалогов.
 
+export interface StageDocRef { id: string; file_name: string; kind: string; mime: string; at: string }
 export interface Campaign {
+  confirmation: StageDocRef | null; final_terms: StageDocRef | null;
   id: string; number: number; title: string; stage: string; cancel_reason: string | null; period_from: string; period_to: string; control_date: string; overdue: boolean;
   network: { id: string; name: string; regions: string[] }; type: { id: string; name: string; period_split: string }; owner: { id: string; name: string };
   legal_entities: { id: string; inn: string; name: string; active: boolean; selected: boolean }[];
