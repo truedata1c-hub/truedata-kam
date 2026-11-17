@@ -1,0 +1,79 @@
+# Стенд PharmaCheck · Переговоры на VPS рядом с MDM. Секреты — в /opt/truedata/kam/.env на сервере (не в Git), см. deploy/README.md.
+name: truedata-kam
+services:
+  db:
+    image: postgres:16-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kam
+      POSTGRES_USER: kam
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      # Диск данных MDM, отдельный каталог модуля. create_host_path: false — без смонтированного диска база не стартует.
+      - type: bind
+        source: ${KAM_DATA_DIR:-/srv/truedata-mdm/kam}/pgdata
+        target: /var/lib/postgresql/data
+        bind: { create_host_path: false }
+    networks: [internal]
+    shm_size: 128m
+    mem_limit: 512m
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U kam -d kam"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    logging: { driver: json-file, options: { max-size: 5m, max-file: "3" } }
+
+  api:
+    image: ${KAM_IMAGE:?set KAM_IMAGE}
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://kam:${POSTGRES_PASSWORD}@db:5432/kam
+      PORT: "8080"
+      SECURE_COOKIES: "true"
+      TRUST_PROXY: "1"
+      FILES_DIR: /data/files
+      # Сквозной вход: открытый ключ платформы (PEM, переводы строк как \n), издатель и адресат токена.
+      SSO_PUBLIC_KEY: ${SSO_PUBLIC_KEY:-}
+      SSO_ISSUER: ${SSO_ISSUER:-truedata-platform}
+      SSO_AUDIENCE: ${SSO_AUDIENCE:-pharmacheck-kam}
+      # Адреса платформы, которым разрешено встраивать модуль.
+      FRAME_ANCESTORS: ${FRAME_ANCESTORS:-https://app.truedata.tech}
+      # Демо-платформа стенда: закрытый ключ демо-платформы и пароль страницы /demo-platform.
+      SSO_DEMO_PRIVATE_KEY: ${SSO_DEMO_PRIVATE_KEY:-}
+      DEMO_PLATFORM_PASSWORD: ${DEMO_PLATFORM_PASSWORD:-}
+    volumes:
+      - type: bind
+        source: ${KAM_DATA_DIR:-/srv/truedata-mdm/kam}/files
+        target: /data/files
+        bind: { create_host_path: false }
+    read_only: true
+    tmpfs: [/tmp:size=32m]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 384m
+    cpus: 1.0
+    networks: [internal, coolify]
+    expose: ["8080"]
+    labels:
+      traefik.enable: "true"
+      traefik.docker.network: coolify
+      traefik.http.routers.kam-app-http.rule: Host(`${KAM_HOST:?set KAM_HOST}`)
+      traefik.http.routers.kam-app-http.entrypoints: http
+      traefik.http.routers.kam-app-http.middlewares: kam-app-https
+      traefik.http.middlewares.kam-app-https.redirectscheme.scheme: https
+      traefik.http.middlewares.kam-app-https.redirectscheme.permanent: "true"
+      traefik.http.routers.kam-app.rule: Host(`${KAM_HOST}`)
+      traefik.http.routers.kam-app.entrypoints: https
+      traefik.http.routers.kam-app.tls: "true"
+      traefik.http.routers.kam-app.tls.certresolver: letsencrypt
+      traefik.http.routers.kam-app.service: kam-app
+      traefik.http.services.kam-app.loadbalancer.server.port: "8080"
+    logging: { driver: json-file, options: { max-size: 5m, max-file: "3" } }
+
+networks:
+  internal:
+  coolify:
+    external: true

@@ -1,0 +1,67 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - name: Интерфейс
+        run: cd web && npm ci && npm run build
+      - run: docker build -t truedata-kam:ci .
+
+  # Сквозная проверка скрипта выпуска на имитации VPS: первый выпуск, демо-набор, сломанная версия и откат.
+  deploy-script:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Имитация сервера
+        run: |
+          sudo install -d /srv/truedata-mdm/kam
+          echo test | sudo tee /srv/truedata-mdm/.mdm-data-disk >/dev/null
+          sudo install -d -m 0700 -o 999 -g 999 /srv/truedata-mdm/kam/pgdata
+          sudo install -d -m 0750 -o 1000 -g 1000 /srv/truedata-mdm/kam/files
+          docker network create coolify
+          sudo install -d /opt/truedata/kam
+          printf 'POSTGRES_PASSWORD=%s\nKAM_HOST=kam.ci.test\nKAM_DATA_DIR=/srv/truedata-mdm/kam\nKAM_IMAGE=\n' "$(openssl rand -hex 16)" | sudo tee /opt/truedata/kam/.env >/dev/null
+          sudo cp deploy/compose.yaml /opt/truedata/kam/compose.yaml
+      - name: Первый выпуск
+        run: |
+          docker build -t truedata-kam:v-ci1 .
+          docker save truedata-kam:v-ci1 | gzip -1 | sudo deploy/server/kam-deploy v-ci1
+          cd /opt/truedata/kam
+          sudo docker compose --env-file .env exec -T -e KAM_PASSWORD=ci-password-123 api node dist/src/cli.js seed-demo
+          sudo docker compose --env-file .env exec -T api node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>r.json()).then(j=>{if(!j.ok)process.exit(1);console.log(j)})"
+          sudo docker compose --env-file .env exec -T api node -e "fetch('http://127.0.0.1:8080/').then(r=>r.text()).then(t=>{if(!t.includes('PharmaCheck · Переговоры'))process.exit(1);console.log('интерфейс отдаётся')})"
+      - name: Сломанная версия откатывается
+        run: |
+          printf 'FROM truedata-kam:v-ci1\nCMD ["node","-e","process.exit(1)"]\n' | docker build -t truedata-kam:v-ci2 -
+          if docker save truedata-kam:v-ci2 | gzip -1 | sudo deploy/server/kam-deploy v-ci2; then
+            echo "сломанная версия не должна была пройти"; exit 1
+          fi
+          grep -q '^KAM_IMAGE=truedata-kam:v-ci1$' /opt/truedata/kam/.env
+          cd /opt/truedata/kam
+          cid=$(sudo docker compose --env-file .env ps -q api)
+          test "$(docker inspect -f '{{.State.Health.Status}}' "$cid")" = healthy
+          sudo docker compose --env-file .env exec -T db psql -U kam -d kam -tAc "select code from kam.client" | grep -qx DEMO
+      - name: Журнал при ошибке
+        if: failure()
+        run: cd /opt/truedata/kam && sudo docker compose --env-file .env logs --tail 80 || true

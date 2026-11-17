@@ -1,0 +1,112 @@
+/* Элементы модуля переговоров поверх темы TrueData (theme.css): KPI-карточки, полоса этапов, шаги кампании, история. */
+
+.pageHead { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 14px; }
+.pageHead .pageTitle { margin-bottom: 2px; }
+
+/* KPI — как плашки портала: подпись 10.5 px, значение 18 px / 700, белая карточка с тонкой рамкой. */
+.kpiGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.kpi { border: 1px solid var(--line); border-radius: 9px; background: #fff; padding: 12px 14px; text-align: left; font: inherit; color: inherit; }
+button.kpi { cursor: pointer; }
+button.kpi:hover { background: var(--hover); }
+.kpi.selected { border-color: var(--purple-line); background: var(--purple-soft); }
+.kpiLabel { font-size: 10.5px; line-height: 15px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.kpiValue { font-size: 18px; line-height: 26px; font-weight: 700; color: var(--ink); margin-top: 4px; }
+.kpiValue.red { color: var(--red); }
+.kpiSub { font-size: 11px; line-height: 15px; color: var(--muted); margin-top: 2px; }
+
+/* Полоса этапов портфеля: количество кампаний на каждом этапе, клик — фильтр. */
+.stageStrip { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; background: #fff; }
+.stageStrip button { all: unset; cursor: pointer; padding: 9px 12px; border-right: 1px solid var(--line); display: grid; gap: 2px; }
+.stageStrip button:last-child { border-right: 0; }
+.stageStrip button:hover { background: var(--hover); }
+.stageStrip button.active { background: var(--active); }
+.stageStrip button:focus-visible { outline: 2px solid var(--purple-line); outline-offset: -2px; }
+.stageStrip .n { font-size: 15px; line-height: 21px; font-weight: 700; color: var(--ink); }
+.stageStrip .l { font-size: 11px; line-height: 15px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stageStrip .bar { height: 3px; border-radius: 2px; background: var(--line); margin-top: 4px; overflow: hidden; }
+.stageStrip .bar i { display: block; height: 100%; background: #98a2b3; }
+.stageStrip button.active .bar i { background: var(--purple); }
+
+/* Шапка карточки кампании: заголовок, теги реквизитов, действия, шаги. */
+.headPanel { border: 1px solid var(--line); border-radius: 9px; background: #fff; padding: 14px 16px 12px; }
+.headTop { display: flex; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+.headTitle { font-size: 15px; line-height: 21px; font-weight: 600; color: var(--ink); }
+.metaTags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.metaTag { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 6px; background: #f2f4f7; color: var(--text-2); font-size: 11.5px; white-space: nowrap; }
+.metaTag.red { background: var(--red-soft); color: var(--red); }
+.headActions { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+.steps { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 6px; margin-top: 14px; }
+.step { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border-radius: 8px; color: var(--muted); }
+.step .num { flex: none; width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; font-weight: 600; border: 1px solid var(--control); background: #fff; color: var(--muted); }
+.step .txt { font-size: 11.5px; line-height: 15px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.step.done .num { background: #f2f4f7; border-color: #f2f4f7; color: var(--text-2); }
+.step.done { color: var(--text-2); }
+.step.current { background: var(--purple-soft); color: var(--purple); }
+.step.current .num { background: var(--purple); border-color: var(--purple); color: #fff; }
+.steps.halted .step.current { background: var(--red-soft); color: var(--red); }
+.steps.halted .step.current .num { background: var(--red); border-color: var(--red); }
+
+.twoCol { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 12px; margin-top: 12px; align-items: start; }
+.panelHead { display: flex; align-items: center; gap: 8px; padding: 12px 14px 10px; }
+.panelTitle { font-size: 13px; line-height: 18px; font-weight: 600; color: var(--ink); }
+.panelBody { padding: 0 14px 14px; }
+.stack { display: grid; gap: 12px; }
+
+.placeholder { border: 1px dashed var(--control); border-radius: 8px; padding: 18px; color: var(--muted); display: flex; gap: 12px; align-items: flex-start; background: #fcfcfd; }
+
+/* История кампании — вертикальная лента с маркерами. */
+.timeline { list-style: none; margin: 0; padding: 0; position: relative; }
+.timeline li { position: relative; padding: 0 0 14px 18px; }
+.timeline li::before { content: ''; position: absolute; left: 4px; top: 6px; bottom: -6px; width: 1px; background: var(--line); }
+.timeline li:last-child::before { display: none; }
+.timeline li::after { content: ''; position: absolute; left: 0; top: 4px; width: 9px; height: 9px; border-radius: 50%; background: #fff; border: 2px solid #98a2b3; }
+.timeline li.first::after { border-color: var(--purple); background: var(--purple); }
+.timeline time { display: block; font-size: 11px; line-height: 15px; color: var(--muted); }
+.timeline strong { display: block; font-size: 12px; line-height: 18px; font-weight: 600; color: var(--ink); }
+.timeline span { display: block; font-size: 11.5px; line-height: 16px; color: var(--text-2); }
+.timeline .comment { margin-top: 3px; padding: 6px 8px; border-radius: 6px; background: #f9fafb; color: var(--text); }
+
+.linkBtn { all: unset; cursor: pointer; color: var(--ink); font-weight: 500; }
+.linkBtn:hover { color: var(--purple); text-decoration: underline; }
+.linkBtn:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; border-radius: 2px; }
+.linkBtn.accent { color: var(--purple); }
+.actionCell { text-align: right; white-space: nowrap; }
+.actionCell .linkBtn + .linkBtn { margin-left: 14px; }
+
+.checkList { border: 1px solid var(--line); border-radius: 8px; max-height: 220px; overflow-y: auto; }
+.checkList label { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.checkList label:last-child { border-bottom: 0; }
+.checkList label:hover { background: var(--hover); }
+.checkList input { accent-color: var(--purple); width: 15px; height: 15px; }
+.checkList .sub { color: var(--muted); font-size: 11px; }
+
+.choiceGrid { display: grid; gap: 6px; }
+.choice { display: flex; gap: 10px; align-items: flex-start; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.choice:hover { background: var(--hover); }
+.choice.on { border-color: var(--purple-line); background: var(--purple-soft); }
+.choice input { accent-color: var(--purple); margin-top: 2px; }
+.choice b { display: block; font-weight: 600; font-size: 12px; color: var(--ink); }
+.choice small { display: block; color: var(--muted); font-size: 11px; line-height: 15px; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 4px; }
+.tableTools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0; }
+.overdue { color: var(--red); font-weight: 500; }
+.dateIn { width: 150px; }
+
+/* Встроенный режим: без меню и шапки, только рабочая область. */
+.embedShell { padding: 12px 16px 32px; }
+.embedNav { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+
+@media (max-width: 1100px) {
+  .twoCol { grid-template-columns: 1fr; }
+  .steps { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stageStrip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .stageStrip button:nth-child(3) { border-right: 0; }
+  .stageStrip button:nth-child(-n+3) { border-bottom: 1px solid var(--line); }
+}
+@media (max-width: 600px) {
+  .steps { grid-template-columns: 1fr 1fr; }
+  .headActions { margin-left: 0; justify-content: flex-start; }
+}
+.cellSub.clip { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Выпуск PharmaCheck · Переговоры на VPS. Единственная команда, которую разрешено выполнить ключу развёртывания
+# из GitHub Actions (forced command в authorized_keys пользователя kam-deploy).
+#
+# Вход (SSH_ORIGINAL_COMMAND или аргументы):
+#   pull <версия> — образ скачивается из ghcr.io (только недостающие слои); вход в реестр выполнен
+#                   заранее: sudo -u kam-deploy -H docker login ghcr.io -u <логин> (токен read:packages);
+#   <версия>      — прежний способ: gzip-архив `docker save` в stdin.
+# Порядок: проверка места → получение образа → compose из образа → запуск → ожидание health →
+# при неудаче возврат прежней версии.
+set -euo pipefail
+
+APP_DIR=/opt/truedata/kam
+DATA_DIR=/srv/truedata-mdm/kam
+MIN_FREE_MB=1500
+KEEP_IMAGES=3
+
+log() { echo "[kam-deploy] $*"; }
+die() { echo "[kam-deploy] ОШИБКА: $*" >&2; exit 1; }
+
+# Переопределение только для проверки в CI (локальный реестр); клиент SSH переменные окружения не передаёт.
+REGISTRY_IMAGE=${KAM_REGISTRY_IMAGE:-ghcr.io/truedata1c-hub/truedata-kam}
+read -r -a ARGS <<<"${SSH_ORIGINAL_COMMAND:-$*}"
+MODE=archive
+if [[ "${ARGS[0]:-}" == pull ]]; then MODE=pull; VERSION="${ARGS[1]:-}"; [[ ${#ARGS[@]} -eq 2 ]] || die "ожидается: pull <версия>"
+else VERSION="${ARGS[0]:-}"; [[ ${#ARGS[@]} -eq 1 ]] || die "ожидается: <версия>"; fi
+[[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$ ]] || die "некорректное имя версии: '$VERSION'"
+IMAGE="truedata-kam:$VERSION"
+
+cd "$APP_DIR"
+[[ -f .env ]] || die "нет $APP_DIR/.env — выполните install.sh"
+[[ -f "/srv/truedata-mdm/.mdm-data-disk" ]] || die "диск данных MDM не смонтирован в /srv/truedata-mdm"
+
+free_mb=$(df -Pm / | awk 'NR==2 {print $4}')
+(( free_mb >= MIN_FREE_MB )) || die "на системном диске свободно ${free_mb} МБ, нужно не меньше ${MIN_FREE_MB}"
+
+if [[ "$MODE" == pull ]]; then
+  log "скачивание $REGISTRY_IMAGE:$VERSION"
+  started=$(date +%s)
+  docker pull -q "$REGISTRY_IMAGE:$VERSION" >/dev/null || die "не удалось скачать образ; проверьте вход в ghcr.io (docker login)"
+  # Локальное имя то же, что при загрузке архивом: compose и очистка работают одинаково.
+  docker tag "$REGISTRY_IMAGE:$VERSION" "$IMAGE"
+  docker rmi "$REGISTRY_IMAGE:$VERSION" >/dev/null
+  log "образ получен за $(( $(date +%s) - started )) с"
+else
+  log "загрузка образа $IMAGE"
+  loaded=$(gunzip -c | docker load)
+  grep -qF "Loaded image: $IMAGE" <<<"$loaded" || die "в архиве нет образа $IMAGE: $loaded"
+fi
+
+previous=$(grep -E '^KAM_IMAGE=' .env | cut -d= -f2- || true)
+cp compose.yaml compose.yaml.prev 2>/dev/null || true
+
+# compose берётся из того же образа, что и код, — версии не расходятся.
+docker run --rm --entrypoint cat "$IMAGE" /app/deploy/compose.yaml > compose.yaml.next
+KAM_IMAGE="$IMAGE" docker compose --env-file .env -f compose.yaml.next config -q || die "compose из образа не проходит проверку"
+mv compose.yaml.next compose.yaml
+
+set_image() {
+  if grep -qE '^KAM_IMAGE=' .env; then sed -i "s|^KAM_IMAGE=.*|KAM_IMAGE=$1|" .env; else echo "KAM_IMAGE=$1" >> .env; fi
+}
+
+wait_healthy() {
+  local cid status
+  for _ in $(seq 1 45); do
+    cid=$(docker compose --env-file .env -f compose.yaml ps -q api || true)
+    status=$(docker inspect -f '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo starting)
+    [[ "$status" == healthy ]] && return 0
+    [[ "$status" == unhealthy ]] && return 1
+    sleep 2
+  done
+  return 1
+}
+
+# Образ базы скачивается один раз; дальше выпуски работают без обращения к реестру.
+db_image=$(KAM_IMAGE="$IMAGE" docker compose --env-file .env -f compose.yaml config --images | grep -v '^truedata-kam:' || true)
+for img in $db_image; do docker image inspect "$img" >/dev/null 2>&1 || docker pull -q "$img"; done
+
+set_image "$IMAGE"
+log "запуск $IMAGE (прежняя версия: ${previous:-нет})"
+if docker compose --env-file .env -f compose.yaml up -d --no-build --pull never --remove-orphans && wait_healthy; then
+  log "версия $VERSION работает"
+else
+  docker compose --env-file .env -f compose.yaml logs --tail 40 api >&2 || true
+  if [[ -n "$previous" ]]; then
+    log "возврат к $previous"
+    set_image "$previous"
+    [[ -f compose.yaml.prev ]] && cp compose.yaml.prev compose.yaml
+    docker compose --env-file .env -f compose.yaml up -d --no-build --pull never --remove-orphans || true
+    wait_healthy && log "прежняя версия восстановлена" || log "прежняя версия не поднялась — нужна ручная проверка"
+  fi
+  die "версия $VERSION не прошла проверку состояния"
+fi
+
+# Хранятся несколько последних образов модуля; чужие образы не трогаются.
+docker images truedata-kam --format '{{.CreatedAt}}\t{{.Repository}}:{{.Tag}}' | sort -r | tail -n +$((KEEP_IMAGES + 1)) | cut -f2 \
+  | while read -r old; do [[ "$old" == "$IMAGE" || "$old" == "$previous" ]] || docker rmi "$old" >/dev/null 2>&1 || true; done
+echo "$VERSION $(date -u +%FT%TZ)" >> releases.log
