@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Однократная подготовка VPS к выпускам модуля переговоров из GitHub Actions. Запускать от root:
 #
-#   ./install.sh "ssh-ed25519 AAAA... kam-deploy-github"
+#   ./install.sh "ssh-ed25519 AAAA... kam-deploy-github"   — с ключом для выпусков из GitHub Actions
+#   ./install.sh                                            — без ключа (выпуски на самом сервере, stand-release.sh)
 #
 # Создаёт пользователя kam-deploy, которому разрешена ровно одна команда — kam-deploy;
 # каталог данных на диске MDM (/srv/truedata-mdm/kam), /opt/truedata/kam и .env со случайным паролем базы,
@@ -10,13 +11,13 @@ set -euo pipefail
 
 PUBKEY="${1:-}"
 APP_DIR=/opt/truedata/kam
-DATA_DIR=/srv/truedata-mdm/kam
+# Данные — на диске данных MDM, если он есть; иначе на системном диске.
+if [[ -f /srv/truedata-mdm/.mdm-data-disk ]]; then DATA_DIR=/srv/truedata-mdm/kam; else DATA_DIR=/srv/truedata-kam; fi
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 die() { echo "ОСТАНОВКА: $*" >&2; exit 1; }
 [[ $EUID -eq 0 ]] || die "запустите от root"
-[[ "$PUBKEY" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ .*)?$ ]] || die "передайте публичный ключ ssh-ed25519 одной строкой в кавычках"
-[[ -f /srv/truedata-mdm/.mdm-data-disk ]] || die "диск данных MDM не смонтирован в /srv/truedata-mdm"
+[[ -z "$PUBKEY" || "$PUBKEY" =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ .*)?$ ]] || die "передайте публичный ключ ssh-ed25519 одной строкой в кавычках"
 command -v docker >/dev/null || die "docker не установлен"
 docker network inspect coolify >/dev/null 2>&1 || die "нет docker-сети coolify (Traefik)"
 
@@ -35,6 +36,7 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
   openssl genpkey -algorithm ed25519 -out "$tmp/demo.key"
   openssl pkey -in "$tmp/demo.key" -pubout -out "$tmp/demo.pub"
   demo_pass=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-16)
+  users_pass=$(openssl rand -base64 18 | tr -d '/+=' | cut -c1-14)
   {
     echo "POSTGRES_PASSWORD=$(openssl rand -hex 32)"
     echo "KAM_HOST=kam.demo.truedata.tech"
@@ -48,20 +50,23 @@ if [[ ! -f "$APP_DIR/.env" ]]; then
     echo "SSO_PUBLIC_KEY=$(awk '{printf "%s\\n", $0}' "$tmp/demo.pub")"
     echo "SSO_DEMO_PRIVATE_KEY=$(awk '{printf "%s\\n", $0}' "$tmp/demo.key")"
     echo "DEMO_PLATFORM_PASSWORD=$demo_pass"
+    # Пароль демо-пользователей (вход напрямую в модуль); используется командой seed-demo.
+    echo "KAM_DEMO_PASSWORD=$users_pass"
   } > "$APP_DIR/.env"
   rm -rf "$tmp"
   chown kam-deploy:kam-deploy "$APP_DIR/.env"
   chmod 0600 "$APP_DIR/.env"
-  echo "создан $APP_DIR/.env; пароль страницы /demo-platform: $demo_pass"
+  echo "создан $APP_DIR/.env"
 fi
 [[ -f "$APP_DIR/compose.yaml" ]] || install -m 0640 -o kam-deploy -g kam-deploy "$HERE/../compose.yaml" "$APP_DIR/compose.yaml"
 
-install -d -m 0700 -o kam-deploy -g kam-deploy /home/kam-deploy/.ssh
-echo "command=\"/usr/local/bin/kam-deploy\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $PUBKEY" \
-  > /home/kam-deploy/.ssh/authorized_keys
-chown kam-deploy:kam-deploy /home/kam-deploy/.ssh/authorized_keys
-chmod 0600 /home/kam-deploy/.ssh/authorized_keys
-
-echo
-echo "Готово. Отпечаток ключа сервера — сверьте его с выводом ssh-keyscan на своём компьютере:"
-ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+if [[ -n "$PUBKEY" ]]; then
+  install -d -m 0700 -o kam-deploy -g kam-deploy /home/kam-deploy/.ssh
+  echo "command=\"/usr/local/bin/kam-deploy\",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-pty $PUBKEY" \
+    > /home/kam-deploy/.ssh/authorized_keys
+  chown kam-deploy:kam-deploy /home/kam-deploy/.ssh/authorized_keys
+  chmod 0600 /home/kam-deploy/.ssh/authorized_keys
+  echo "Ключ выпусков установлен. Отпечаток ключа сервера:"
+  ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub
+fi
+echo "Подготовка завершена: данные в $DATA_DIR, настройки в $APP_DIR/.env"

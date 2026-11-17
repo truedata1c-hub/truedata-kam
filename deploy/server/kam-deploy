@@ -5,13 +5,13 @@
 # Вход (SSH_ORIGINAL_COMMAND или аргументы):
 #   pull <версия> — образ скачивается из ghcr.io (только недостающие слои); вход в реестр выполнен
 #                   заранее: sudo -u kam-deploy -H docker login ghcr.io -u <логин> (токен read:packages);
-#   <версия>      — прежний способ: gzip-архив `docker save` в stdin.
+#   <версия>      — прежний способ: gzip-архив `docker save` в stdin;
+#   local <версия> — образ truedata-kam:<версия> уже собран на этом сервере (stand-release.sh).
 # Порядок: проверка места → получение образа → compose из образа → запуск → ожидание health →
 # при неудаче возврат прежней версии.
 set -euo pipefail
 
 APP_DIR=/opt/truedata/kam
-DATA_DIR=/srv/truedata-mdm/kam
 MIN_FREE_MB=1500
 KEEP_IMAGES=3
 
@@ -22,14 +22,15 @@ die() { echo "[kam-deploy] ОШИБКА: $*" >&2; exit 1; }
 REGISTRY_IMAGE=${KAM_REGISTRY_IMAGE:-ghcr.io/truedata1c-hub/truedata-kam}
 read -r -a ARGS <<<"${SSH_ORIGINAL_COMMAND:-$*}"
 MODE=archive
-if [[ "${ARGS[0]:-}" == pull ]]; then MODE=pull; VERSION="${ARGS[1]:-}"; [[ ${#ARGS[@]} -eq 2 ]] || die "ожидается: pull <версия>"
+if [[ "${ARGS[0]:-}" == pull || "${ARGS[0]:-}" == local ]]; then MODE="${ARGS[0]}"; VERSION="${ARGS[1]:-}"; [[ ${#ARGS[@]} -eq 2 ]] || die "ожидается: ${ARGS[0]} <версия>"
 else VERSION="${ARGS[0]:-}"; [[ ${#ARGS[@]} -eq 1 ]] || die "ожидается: <версия>"; fi
 [[ "$VERSION" =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,63}$ ]] || die "некорректное имя версии: '$VERSION'"
 IMAGE="truedata-kam:$VERSION"
 
 cd "$APP_DIR"
 [[ -f .env ]] || die "нет $APP_DIR/.env — выполните install.sh"
-[[ -f "/srv/truedata-mdm/.mdm-data-disk" ]] || die "диск данных MDM не смонтирован в /srv/truedata-mdm"
+DATA_DIR=$(grep -E '^KAM_DATA_DIR=' .env | cut -d= -f2- || true)
+[[ -n "$DATA_DIR" && -d "$DATA_DIR/pgdata" && -d "$DATA_DIR/files" ]] || die "каталог данных KAM_DATA_DIR не подготовлен — выполните install.sh"
 
 free_mb=$(df -Pm / | awk 'NR==2 {print $4}')
 (( free_mb >= MIN_FREE_MB )) || die "на системном диске свободно ${free_mb} МБ, нужно не меньше ${MIN_FREE_MB}"
@@ -42,6 +43,8 @@ if [[ "$MODE" == pull ]]; then
   docker tag "$REGISTRY_IMAGE:$VERSION" "$IMAGE"
   docker rmi "$REGISTRY_IMAGE:$VERSION" >/dev/null
   log "образ получен за $(( $(date +%s) - started )) с"
+elif [[ "$MODE" == local ]]; then
+  docker image inspect "$IMAGE" >/dev/null 2>&1 || die "на сервере нет образа $IMAGE"
 else
   log "загрузка образа $IMAGE"
   loaded=$(gunzip -c | docker load)
