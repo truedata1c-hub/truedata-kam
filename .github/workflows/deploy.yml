@@ -28,6 +28,8 @@ jobs:
   deploy:
     runs-on: ubuntu-24.04
     environment: stand
+    # Выпуск обычно занимает около двух минут; зависшая передача не должна держать выпуск часами.
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16
@@ -81,12 +83,17 @@ jobs:
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
         run: |
-          SSH=(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o BatchMode=yes "kam-deploy@$VPS_HOST")
+          SSH=(ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=yes -o BatchMode=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=8 "kam-deploy@$VPS_HOST")
           if [[ "$TRANSPORT" == registry ]]; then
             # Сервер сам скачивает образ из ghcr.io: передаются только слои, которых у него ещё нет.
             "${SSH[@]}" "pull $VERSION" < /dev/null
           else
-            docker save "truedata-kam:$VERSION" | gzip -1 | "${SSH[@]}" "$VERSION"
+            docker image inspect "truedata-kam:$VERSION" --format 'размер образа: {{.Size}} байт'
+            docker save "truedata-kam:$VERSION" | gzip -1 > /tmp/image.tgz
+            echo "архив: $(du -h /tmp/image.tgz | cut -f1)"
+            start=$(date +%s)
+            "${SSH[@]}" "$VERSION" < /tmp/image.tgz
+            echo "передача и запуск: $(( $(date +%s) - start )) с"
           fi
       - name: Проверка по адресу стенда
         run: |
