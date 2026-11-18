@@ -27,6 +27,7 @@
       <div class="toolbar" style="margin-top: 14px"><button class="tdBtn primary" :disabled="busy" @click="save">Сохранить</button></div>
     </div>
     <MailSettings />
+    <BackupStatus />
   </div>
 </template>
 
@@ -37,6 +38,7 @@ import { api } from '../api';
 import { base, announceTitle } from '../store';
 import { useCommand } from '../command';
 import MailSettings from '../components/MailSettings.vue';
+import BackupStatus from '../components/BackupStatus.vue';
 
 interface T { investment_growth_pct: number; execution_below_pct: number; roi_below_prior: boolean }
 const $q = useQuasar();

@@ -32,7 +32,7 @@ const addDays = (iso: string, days: number) => new Date(Date.parse(iso + 'T00:00
 // Портфель ------------------------------------------------------------------
 
 export interface ListQuery {
-  year?: string; stage?: string; type?: string; network?: string; owner?: string; q?: string; overdue?: string; group?: string;
+  year?: string; stage?: string; type?: string; network?: string; owner?: string; q?: string; overdue?: string; group?: string; brand?: string;
 }
 
 export async function listCampaigns(ctx: Ctx, q: ListQuery) {
@@ -48,6 +48,12 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
   if (q.network && isUuid(q.network)) where.push(`c.network_id = ${push(q.network)}`);
   if (q.owner && isUuid(q.owner)) where.push(`c.owner_id = ${push(q.owner)}`);
   if (q.group && isUuid(q.group)) where.push(`n.group_id = ${push(q.group)}`);
+  // Бренд — есть в разбивке текущей версии.
+  if (q.brand && isUuid(q.brand)) {
+    where.push(`exists (select 1 from kam.offer_version_cell x join kam.offer_version ov on ov.client_id = x.client_id and ov.id = x.version_id
+                 where ov.client_id = c.client_id and ov.campaign_id = c.id and x.brand_id = ${push(q.brand)}
+                   and ov.number = (select max(number) from kam.offer_version m where m.client_id = c.client_id and m.campaign_id = c.id))`);
+  }
   if (q.q && q.q.trim()) {
     const term = q.q.trim().slice(0, 100);
     const like = push(`%${term.replace(/[\\%_]/g, (m) => '\\' + m)}%`);

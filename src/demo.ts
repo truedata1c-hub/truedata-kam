@@ -16,7 +16,7 @@ import { addWorkdays } from './approval.js';
 
 export const DEMO_CODE = 'DEMO';
 /** Версия демо-набора: при её росте стенд пересоздаёт набор при запуске (DEMO_AUTO_UPGRADE). */
-export const DEMO_VERSION = 4;
+export const DEMO_VERSION = 5;
 
 function rng(seed: number) {
   return () => {
@@ -36,7 +36,7 @@ function inn10(prefix: string, r: () => number): string {
 }
 
 const ROLES = [
-  { key: 'kam', name: 'КАМ', description: 'Ведёт переговорные кампании по закреплённым сетям.', permissions: ['CAMPAIGN_EDIT'], scope: 'OWN' },
+  { key: 'kam', name: 'КАМ', description: 'Ведёт переговорные кампании по закреплённым сетям.', permissions: ['CAMPAIGN_EDIT', 'ANALYTICS'], scope: 'OWN' },
   { key: 'head', name: 'Руководитель КАМ', description: 'Руководит группой КАМ, согласует кампании подчинённых.', permissions: ['CAMPAIGN_EDIT', 'CAMPAIGN_EDIT_SUBORDINATES', 'APPROVE', 'ANALYTICS'], scope: 'SUBORDINATES' },
   { key: 'national', name: 'Национальный руководитель', description: 'Руководитель направления аптечных сетей.', permissions: ['CAMPAIGN_EDIT_SUBORDINATES', 'APPROVE', 'ANALYTICS'], scope: 'SUBORDINATES' },
   { key: 'cfo', name: 'Финансовый директор', description: 'Согласует крупные инвестиции в сети.', permissions: ['APPROVE', 'ANALYTICS'], scope: 'ALL' },

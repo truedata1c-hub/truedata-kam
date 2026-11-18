@@ -48,9 +48,9 @@
           <span v-if="state.pendingDecisions && !collapsed" class="navBadge">{{ state.pendingDecisions }}</span>
           <q-tooltip v-if="collapsed" anchor="center right" self="center left">Мои решения</q-tooltip>
         </button>
-        <button class="navItem sub" :disabled="true" aria-disabled="true">
+        <button v-if="can('ANALYTICS')" class="navItem sub" :class="{ active: state.page === 'analytics' }" :aria-current="state.page === 'analytics' ? 'page' : undefined" @click="go('analytics')">
           <Icon id="bar-chart-square-02" :size="15" /><span>Аналитика</span>
-          <q-tooltip anchor="center right" self="center left">Появится на шаге 5</q-tooltip>
+          <q-tooltip v-if="collapsed" anchor="center right" self="center left">Аналитика</q-tooltip>
         </button>
         <div v-for="n in platformNav" :key="n.label" class="navItem disabled" aria-disabled="true">
           <Icon :id="n.icon" :size="15" /><span>{{ n.label }}</span>
@@ -114,7 +114,7 @@
 import { computed, defineComponent, h, onBeforeUnmount, onMounted, ref, provide } from 'vue';
 import { useQuasar } from 'quasar';
 import { api, setUnauthorizedHandler } from './api';
-import { state, company, embedded, isAdmin, loadMe, loadRef, selectCompany, go, readRoute, refreshPending, type Page } from './store';
+import { state, company, embedded, isAdmin, can, loadMe, loadRef, selectCompany, go, readRoute, refreshPending, type Page } from './store';
 import { initials } from './format';
 import LoginPage from './pages/LoginPage.vue';
 import PortfolioPage from './pages/PortfolioPage.vue';
@@ -128,6 +128,7 @@ import AuditPage from './pages/AuditPage.vue';
 import PriorPage from './pages/PriorPage.vue';
 import SettingsPage from './pages/SettingsPage.vue';
 import MyDecisionsPage from './pages/MyDecisionsPage.vue';
+import AnalyticsPage from './pages/AnalyticsPage.vue';
 import RoutesPage from './pages/RoutesPage.vue';
 import SubstitutionsPage from './pages/SubstitutionsPage.vue';
 import PasswordDialog from './components/PasswordDialog.vue';
@@ -164,7 +165,7 @@ const adminTitle = computed(() => adminNav.find((a) => a.page === state.page)?.l
 const embedTabs = computed(() => [
   { page: 'portfolio' as Page, label: 'Кампании', active: state.page === 'portfolio' || state.page === 'campaign', disabled: false, hint: '' },
   { page: 'decisions' as Page, label: state.pendingDecisions ? `Мои решения · ${state.pendingDecisions}` : 'Мои решения', active: state.page === 'decisions', disabled: false, hint: '' },
-  { page: 'analytics' as Page, label: 'Аналитика', active: state.page === 'analytics', disabled: true, hint: 'Появится на шаге 5' },
+  ...(can('ANALYTICS') ? [{ page: 'analytics' as Page, label: 'Аналитика', active: state.page === 'analytics', disabled: false, hint: '' }] : []),
   ...(isAdmin.value ? [{ page: 'users' as Page, label: 'Настройки', active: adminPage.value, disabled: false, hint: '' }] : []),
 ]);
 const companyOptions = computed(() => (state.me?.companies ?? []).map((c) => ({ label: c.name, value: c.id })));
@@ -175,7 +176,7 @@ const PageBody = defineComponent({
     return () => {
       if (!company.value) return h('div', { class: 'panel emptyState' }, 'У вашей учётной записи нет доступа ни к одной компании. Обратитесь к администратору.');
       const key = `${state.companyId}:${state.page}:${state.campaignId ?? ''}`;
-      const map: Partial<Record<Page, unknown>> = { portfolio: PortfolioPage, campaign: CampaignPage, users: UsersPage, roles: RolesPage, networks: NetworksPage, brands: BrandsPage, types: TypesPage, routes: RoutesPage, substitutions: SubstitutionsPage, decisions: MyDecisionsPage, prior: PriorPage, settings: SettingsPage, audit: AuditPage };
+      const map: Partial<Record<Page, unknown>> = { portfolio: PortfolioPage, campaign: CampaignPage, users: UsersPage, roles: RolesPage, networks: NetworksPage, brands: BrandsPage, types: TypesPage, routes: RoutesPage, substitutions: SubstitutionsPage, decisions: MyDecisionsPage, analytics: AnalyticsPage, prior: PriorPage, settings: SettingsPage, audit: AuditPage };
       const comp = map[state.page] ?? PortfolioPage;
       if (adminPage.value && !isAdmin.value) return h('div', { class: 'panel emptyState' }, 'Раздел доступен администратору.');
       return h(comp as any, { key, ...(state.page === 'campaign' ? { id: state.campaignId } : {}) });

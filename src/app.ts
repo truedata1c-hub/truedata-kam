@@ -22,6 +22,8 @@ import * as routeTemplates from './routes.js';
 import * as approval from './approval.js';
 import * as notifications from './notify.js';
 import * as network from './network.js';
+import { analytics } from './analytics.js';
+import { backupStatus } from './ops.js';
 import { parseVersion, versionTemplate } from './excel.js';
 import { MAX_FILE_BYTES } from './files.js';
 
@@ -252,6 +254,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.post(`${C}/route-templates/:tid/archive`, command((tx, ctx, req) => routeTemplates.archiveTemplate(tx, ctx, param(req, 'tid'))));
   app.put(`${C}/route-rules`, command((tx, ctx, req) => routeTemplates.saveRules(tx, ctx, body(req))));
   app.post(`${C}/route-templates/preview`, async (req) => routeTemplates.previewTemplate(await ctxOf(req), body(req)));
+
+  app.get(`${C}/backups`, async (req) => backupStatus(await ctxOf(req)));
+  app.get(`${C}/analytics`, async (req) => analytics(await ctxOf(req), req.query as Record<string, string>));
 
   // Работа с сетью и переписка
   app.get(`${C}/networks/:nid/contacts`, async (req) => network.listContacts(await ctxOf(req), param(req, 'nid')));

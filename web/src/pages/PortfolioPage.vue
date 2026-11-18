@@ -59,6 +59,7 @@
       <TdSelect v-model="filters.stage" :options="stageOptions" aria-label="Этап" />
       <TdSelect v-model="filters.type" clearable :options="typeOptions" placeholder="Все типы" aria-label="Тип" />
       <TdSelect v-model="filters.network" clearable :options="networkOptions" placeholder="Все сети" aria-label="Сеть" />
+      <TdSelect v-model="filters.brand" clearable :options="brandOptions" placeholder="Все бренды" aria-label="Бренд" />
       <TdSelect v-if="ownerOptions.length > 1" v-model="filters.owner" clearable :options="ownerOptions" placeholder="Все КАМ" aria-label="Ответственный" />
       <div class="spacer" />
       <button v-if="hasFilters" class="tdBtn accent" @click="reset"><Icon id="eraser" :size="15" /><span>Сбросить</span></button>
@@ -136,7 +137,7 @@ const $q = useQuasar();
 const thisYear = new Date().getFullYear();
 // С октября основной поток — условия следующего года.
 const defaultYear = new Date().getMonth() >= 9 ? thisYear + 1 : thisYear;
-const defaults = () => ({ q: '', year: String(defaultYear), stage: 'ACTIVE', type: null as string | null, network: null as string | null, owner: null as string | null, overdue: false });
+const defaults = () => ({ q: '', year: String(defaultYear), stage: 'ACTIVE', type: null as string | null, network: null as string | null, owner: null as string | null, brand: null as string | null, overdue: false });
 const filters = reactive(readFilters());
 const rows = ref<Row[]>([]);
 const kpi = ref<Kpi>({ investment: 0, turnover: 0, roi: null, with_versions: 0, active: 0, overdue: 0, awaiting_decision: 0, approved: 0, by_stage: {} });
@@ -166,6 +167,7 @@ const typeOptions = computed(() => (state.ref?.types ?? []).map((t) => ({ label:
 const allNetworkOptions = computed(() => (state.ref?.networks ?? []).map((n) => ({ label: n.name, value: n.id })));
 const networkOptions = allNetworkOptions;
 const ownerOptions = computed(() => (state.ref?.owners ?? []).map((o) => ({ label: o.name, value: o.id })));
+const brandOptions = computed(() => (state.ref?.brands ?? []).map((b) => ({ label: b.name, value: b.id })));
 const canCreate = computed(() => (state.ref?.assignable.length ?? 0) > 0);
 const hasFilters = computed(() => JSON.stringify({ ...filters }) !== JSON.stringify(defaults()));
 const scopeText = computed(() => {
@@ -185,7 +187,7 @@ async function load() {
   loading.value = true;
   try {
     const r = await api.get<{ items: Row[]; kpi: Kpi }>(`${base()}/campaigns`, {
-      q: filters.q, year: filters.year, stage: filters.stage, type: filters.type, network: filters.network, owner: filters.owner, overdue: filters.overdue ? '1' : undefined,
+      q: filters.q, year: filters.year, stage: filters.stage, type: filters.type, network: filters.network, owner: filters.owner, brand: filters.brand, overdue: filters.overdue ? '1' : undefined,
     });
     rows.value = r.items;
     kpi.value = r.kpi;
