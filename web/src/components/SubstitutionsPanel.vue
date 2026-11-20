@@ -36,7 +36,7 @@
             </div>
             <div class="full">
               <label class="fieldLabel">Заместитель<span class="req">*</span></label>
-              <TdSelect v-model="form.deputy_id" :options="peopleOptions.filter((p) => p.value !== (admin ? form.user_id : myId))" aria-label="Заместитель" :error="err.field === 'deputy_id'" />
+              <TdSelect v-model="form.deputy_id" :options="deputyOptions.filter((p) => p.value !== (admin ? form.user_id : myId))" aria-label="Заместитель" :error="err.field === 'deputy_id'" />
             </div>
             <div><label class="fieldLabel" for="sb-from">С<span class="req">*</span></label><q-input for="sb-from" v-model="form.from" type="date" outlined dense hide-bottom-space :error="err.field === 'from'" aria-label="С" /></div>
             <div><label class="fieldLabel" for="sb-to">По<span class="req">*</span></label><q-input for="sb-to" v-model="form.to" type="date" outlined dense hide-bottom-space :error="err.field === 'to'" aria-label="По" /></div>
@@ -64,16 +64,18 @@ const props = defineProps<{ admin?: boolean }>();
 interface Sub { id: string; user_id: string; user_name: string; deputy_id: string; deputy_name: string; from: string; to: string; comment: string; active: boolean; past: boolean }
 const $q = useQuasar();
 const items = ref<Sub[]>([]);
-const people = ref<{ id: string; name: string }[]>([]);
+const people = ref<{ id: string; name: string; can_approve: boolean }[]>([]);
 const dlg = ref(false);
 const myId = computed(() => state.me?.user_id ?? '');
 const today = new Date().toISOString().slice(0, 10);
 const form = reactive({ user_id: '' as string | null, deputy_id: null as string | null, from: today, to: today, comment: '' });
 const { err, busy, run } = useCommand();
 const peopleOptions = computed(() => people.value.map((p) => ({ label: p.name, value: p.id })));
+// Заместитель решает шаги согласования — выбрать можно только сотрудника с правом «Согласовывать».
+const deputyOptions = computed(() => people.value.filter((p) => p.can_approve).map((p) => ({ label: p.name, value: p.id })));
 
 async function load() {
-  const r = await api.get<{ items: Sub[]; people: { id: string; name: string }[] }>(`${base()}/substitutions`);
+  const r = await api.get<{ items: Sub[]; people: { id: string; name: string; can_approve: boolean }[] }>(`${base()}/substitutions`);
   items.value = props.admin ? r.items : r.items.filter((s) => s.user_id === myId.value || s.deputy_id === myId.value);
   people.value = r.people;
 }

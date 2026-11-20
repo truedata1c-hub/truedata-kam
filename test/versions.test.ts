@@ -70,6 +70,19 @@ test('сценарий 5: разбивка 3 бренда × 4 квартала 
   const badRes = (await env.app.inject({ method: 'POST', url: `${C(env)}/campaigns/${c.id}/versions/parse`, headers: { ...bad.headers, authorization: `Bearer ${env.tokens['anna.smirnova']}` }, payload: bad.payload })).json();
   assert.equal(badRes.issues.length, 2);
   assert.match(badRes.issues[1].message, /Неизвестный бренд/);
+
+  // Повтор строки бренда и формула без вычисленного значения — ошибки, а не тихая перезапись или ноль.
+  const wb2 = new ExcelJS.Workbook();
+  await wb2.xlsx.load(tpl.rawPayload as unknown as ArrayBuffer);
+  const ws2 = wb2.getWorksheet('Разбивка')!;
+  const firstBrand = ws2.getRow(3);
+  firstBrand.getCell(3).value = 5;
+  ws2.addRow([firstBrand.getCell(1).value, firstBrand.getCell(2).value, 7]);
+  ws2.getRow(4).getCell(3).value = { formula: 'D4*2' } as ExcelJS.CellFormulaValue;
+  const dupMp = multipart({}, { name: 't.xlsx', content: Buffer.from(await wb2.xlsx.writeBuffer()) });
+  const dup = (await env.app.inject({ method: 'POST', url: `${C(env)}/campaigns/${c.id}/versions/parse`, headers: { ...dupMp.headers, authorization: `Bearer ${env.tokens['anna.smirnova']}` }, payload: dupMp.payload })).json();
+  assert.ok(dup.issues.some((i: any) => /уже указан в строке 3/.test(i.message)), JSON.stringify(dup.issues));
+  assert.ok(dup.issues.some((i: any) => i.row === 4 && /Формула без вычисленного значения/.test(i.message)), JSON.stringify(dup.issues));
 });
 
 test('проверки разбивки: пусто, чужой период, отрицательная сумма; бренд без сумм отбрасывается', async () => {

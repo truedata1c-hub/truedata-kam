@@ -66,7 +66,7 @@
           <div class="stack">
             <label class="choice" :class="{ on: active }"><input v-model="active" type="checkbox" :disabled="user.me" />
               <span><b>Доступ к модулю включён</b><small>Отключённый сотрудник не может войти ни из платформы, ни по паролю.</small></span></label>
-            <div v-if="!user.me" class="toolbar">
+            <div v-if="!user.me && !(user.sso && !user.has_password)" class="toolbar">
               <button class="tdBtn" :disabled="busy" @click="resetPassword"><Icon id="lock-01" :size="15" /><span>Выдать временный пароль</span></button>
               <span v-if="tempPassword" class="mono panel" style="padding: 6px 10px">{{ tempPassword }}</span>
             </div>

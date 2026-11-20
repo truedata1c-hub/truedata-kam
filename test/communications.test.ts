@@ -2,6 +2,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { setup, api, C, multipart, type TestEnv } from './helpers.js';
 import { processOutbox, runSchedule, setSender } from '../src/notify.js';
+import { housekeeping } from '../src/housekeeping.js';
 
 let env: TestEnv;
 let call: ReturnType<typeof api>;
@@ -65,23 +66,34 @@ test('уведомления по маршруту: новый шаг, возв�
 });
 
 test('сценарий 15: почтовый канал — очередь до подключения, отправка после, повтор при ошибке', async () => {
+  // Пароль SMTP хранится зашифрованным ключом стенда.
+  process.env.SETTINGS_KEY = Buffer.alloc(32, 7).toString('base64');
+  try {
   const queued = await one<{ n: number }>("select count(*)::int n from kam.email_outbox where client_id=$1 and status='NO_CHANNEL'", [env.demo]);
   assert.ok(queued.n > 0);
+  // Свежие письма (до 3 суток) уйдут, давние — устарели: подключение почты не рассылает старые напоминания задним числом.
+  await env.db.query("update kam.email_outbox set created_at = now() - interval '10 days' where id = (select id from kam.email_outbox where client_id=$1 and status='NO_CHANNEL' order by created_at limit 1)", [env.demo]);
+  const fresh = await one<{ n: number }>("select count(*)::int n from kam.email_outbox where client_id=$1 and status='NO_CHANNEL' and created_at > now() - interval '72 hours'", [env.demo]);
+  assert.ok(fresh.n > 0);
   assert.equal((await call(`${C(env)}/mail`, { as: 'anna.smirnova' })).status, 403);
   const bad = await call(`${C(env)}/mail`, { method: 'PUT', as: 'admin', body: { host: 'smtp.example.ru', port: 587, from: 'не адрес' } });
   assert.equal(bad.json.error.field, 'from');
   const save = await call(`${C(env)}/mail`, { method: 'PUT', as: 'admin', body: { host: 'smtp.example.ru', port: 587, user: 'kam', password: 'secret-pass', from: 'kam@example.ru' } });
   assert.equal(save.status, 200, save.body);
-  assert.equal(save.json.released, queued.n);
+  assert.equal(save.json.released, fresh.n);
+  assert.equal(save.json.released + save.json.expired, queued.n);
+  assert.ok(save.json.expired >= 1);
   const view = (await call(`${C(env)}/mail`, { as: 'admin' })).json;
   assert.equal(view.smtp.has_password, true);
   assert.equal(JSON.stringify(view).includes('secret-pass'), false);
+  const stored = await one<{ p: string }>("select settings->'smtp'->>'password' p from kam.client_setting where client_id=$1", [env.demo]);
+  assert.match(stored.p, /^enc:v1:/);
 
   // Первая попытка: сервер недоступен — письма уходят на повтор.
   setSender(async () => { throw new Error('connect ECONNREFUSED'); });
   const fail = await processOutbox(env.db, 500);
   assert.ok(fail.failed > 0);
-  const retry = await one<{ status: string; attempts: number; last_error: string }>("select status, attempts, last_error from kam.email_outbox where client_id=$1 order by created_at limit 1", [env.demo]);
+  const retry = await one<{ status: string; attempts: number; last_error: string }>("select status, attempts, last_error from kam.email_outbox where client_id=$1 and status <> 'EXPIRED' order by created_at limit 1", [env.demo]);
   assert.deepEqual([retry.status, retry.attempts], ['RETRY', 1]);
   assert.match(retry.last_error, /ECONNREFUSED/);
   // Повтор созрел — сервер ответил.
@@ -95,8 +107,16 @@ test('сценарий 15: почтовый канал — очередь до �
   assert.equal((await call(`${C(env)}/mail/test`, { as: 'admin', body: {} })).json.queued, true);
   assert.equal((await processOutbox(env.db)).sent, 1);
   // Отключение канала: новые письма снова копятся.
+  // Устаревшее письмо можно отправить вручную.
+  const expired = await one<{ id: string }>("select id from kam.email_outbox where client_id=$1 and status='EXPIRED' limit 1", [env.demo]);
+  assert.equal((await call(`${C(env)}/mail/${expired.id}/retry`, { as: 'admin', body: {} })).json.updated, 1);
+  assert.equal((await processOutbox(env.db)).sent, 1);
+  // Отключение канала: новые письма снова копятся.
   assert.equal((await call(`${C(env)}/mail`, { method: 'PUT', as: 'admin', body: { disabled: true } })).status, 200);
   assert.equal((await call(`${C(env)}/mail/test`, { as: 'admin', body: {} })).json.queued, false);
+  } finally {
+    delete process.env.SETTINGS_KEY;
+  }
 });
 
 test('подтверждение сетью и финальные условия требуют документа нужного типа; согласовавшие получают уведомление', async () => {
@@ -121,6 +141,21 @@ test('подтверждение сетью и финальные условия
   assert.equal((await move('dmitry.petrov', cid, 'CLOSE')).json.stage, 'CLOSED');
   const done = (await call(`${C(env)}/campaigns/${cid}`, { as: 'dmitry.petrov' })).json;
   assert.equal(done.final_terms.file_name, 'Финальные условия.xlsx');
+  // Вместе с документами зафиксирована версия разбивки — источник для выгрузки в PharmaCheck.
+  assert.equal(done.confirmation.version, 1);
+  assert.equal(done.final_terms.version, 1);
+  const snap = await call(`${C(env)}/campaigns/${cid}/final-snapshot`, { as: 'dmitry.petrov' });
+  assert.equal(snap.status, 200, snap.body);
+  assert.equal(snap.json.network.name, 'Неофарм');
+  assert.ok(snap.json.legal_entities.length > 0 && snap.json.legal_entities.every((e: any) => /^\d{10}(\d{2})?$/.test(e.inn)));
+  assert.equal(snap.json.version.number, 1);
+  assert.equal(snap.json.version.total_investment, 300000);
+  assert.equal(snap.json.version.cells.reduce((a: number, x: any) => a + x.investment, 0), 300000);
+  assert.equal(snap.json.final_document.file_name, 'Финальные условия.xlsx');
+  assert.equal(snap.json.vat, 'NOT_SPECIFIED');
+  // До финала снимка нет.
+  const early = await negotiation('dmitry.petrov', 'Будь Здоров');
+  assert.equal((await call(`${C(env)}/campaigns/${early}/final-snapshot`, { as: 'dmitry.petrov' })).json.error.code, 'NOT_FINAL');
 });
 
 test('переписка: упоминание участника с уведомлением; не участника упомянуть нельзя; согласующий пишет в кампанию', async () => {
@@ -188,4 +223,41 @@ test('планировщик: просрочка шага — исполните
   await env.db.query("update kam.approval_step set due_date = current_date where campaign_id=$1 and status='ACTIVE'", [other]);
   assert.equal((await runSchedule(env.db)).reminders, 1);
   assert.ok((await notes('elena.sokolova', other)).some((n: any) => n.kind === 'STEP_REMINDER'));
+});
+
+test('перенос контрольной даты снова включает уведомление о её просрочке', async () => {
+  const cid = await negotiation('maria.kuznetsova', 'Эркафарм');
+  await env.db.query('update kam.campaign set control_date = current_date - 1 where id=$1', [cid]);
+  await runSchedule(env.db);
+  const notified = await one<{ at: string | null }>('select control_overdue_notified_at at from kam.campaign where id=$1', [cid]);
+  assert.ok(notified.at);
+  // Новая дата тоже прошла: КАМ снова получает уведомление.
+  const day = (await one<{ d: string }>("select (current_date - 2)::text d")).d;
+  const upd = await call(`${C(env)}/campaigns/${cid}`, { method: 'PATCH', as: 'maria.kuznetsova', ifMatch: await etag(cid, 'maria.kuznetsova'), body: { control_date: day } });
+  assert.equal(upd.status, 200, upd.body);
+  assert.equal((await one<{ at: string | null }>('select control_overdue_notified_at at from kam.campaign where id=$1', [cid])).at, null);
+  assert.ok((await runSchedule(env.db)).control >= 1);
+  // Правка без переноса даты отметку не сбрасывает.
+  await call(`${C(env)}/campaigns/${cid}`, { method: 'PATCH', as: 'maria.kuznetsova', ifMatch: await etag(cid, 'maria.kuznetsova'), body: { title: 'Новое название' } });
+  assert.ok((await one<{ at: string | null }>('select control_overdue_notified_at at from kam.campaign where id=$1', [cid])).at);
+});
+
+test('очистка служебных таблиц: старое удаляется, свежее и журнал остаются', async () => {
+  const anna = await userId('anna.smirnova');
+  await env.db.query("insert into kam.session(token_hash, user_id, expires_at) values ('old-session', $1, now() - interval '3 days'), ('live-session', $1, now() + interval '1 hour')", [anna]);
+  await env.db.query("update kam.idempotency_request set created_at = now() - interval '40 days' where key = (select key from kam.idempotency_request limit 1)");
+  const oldNote = await one<{ id: string }>("update kam.notification set created_at = now() - interval '200 days', read_at = now() - interval '199 days' where id = (select id from kam.notification limit 1) returning id");
+  const freshNote = await one<{ id: string }>("select id from kam.notification where id <> $1 order by created_at desc limit 1", [oldNote.id]);
+  await env.db.query("update kam.email_outbox set status='SENT', created_at = now() - interval '200 days' where id = (select id from kam.email_outbox limit 1)");
+  const audit = await one<{ n: number }>('select count(*)::int n from kam.audit_event');
+  const r = await housekeeping(env.db);
+  assert.ok(r.sessions >= 1 && r.idempotency >= 1 && r.notifications >= 1 && r.emails >= 1, JSON.stringify(r));
+  assert.equal((await env.db.query("select 1 from kam.session where token_hash='old-session'")).rowCount, 0);
+  assert.equal((await env.db.query("select 1 from kam.session where token_hash='live-session'")).rowCount, 1);
+  assert.equal((await env.db.query('select 1 from kam.notification where id=$1', [oldNote.id])).rowCount, 0);
+  assert.equal((await env.db.query('select 1 from kam.notification where id=$1', [freshNote.id])).rowCount, 1);
+  assert.equal((await one<{ n: number }>('select count(*)::int n from kam.audit_event')).n, audit.n);
+  // Повторный запуск ничего не находит.
+  const again = await housekeeping(env.db);
+  assert.equal(again.sessions + again.idempotency + again.notifications + again.emails, 0);
 });

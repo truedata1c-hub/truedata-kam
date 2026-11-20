@@ -17,8 +17,12 @@ export const blobPath = (dir: string, clientId: string, sha: string) => path.joi
 
 export interface Stored { sha256: string; size: number; head: Buffer }
 
-/** Сохраняет поток во временный файл, считая SHA-256 и размер; затем переносит под именем хеша. */
-export async function storeStream(dir: string, clientId: string, input: Readable, limit = MAX_FILE_BYTES): Promise<Stored & { truncated: boolean }> {
+/**
+ * Сохраняет поток во временный файл, считая SHA-256 и размер; затем переносит под именем хеша.
+ * accept проверяет файл до переноса: отклонённый (пустой, исполняемый) не остаётся в хранилище.
+ */
+export async function storeStream(dir: string, clientId: string, input: Readable, limit = MAX_FILE_BYTES,
+  accept: (s: { size: number; head: Buffer }) => boolean = () => true): Promise<Stored & { truncated: boolean; rejected: boolean }> {
   const tmpDir = path.join(dir, '.tmp');
   await mkdir(tmpDir, { recursive: true });
   const tmp = path.join(tmpDir, randomUUID());
@@ -39,14 +43,18 @@ export async function storeStream(dir: string, clientId: string, input: Readable
     await pipeline(input, meter, createWriteStream(tmp, { mode: 0o640 }));
   } catch (e) {
     await rm(tmp, { force: true });
-    if (truncated || (e as Error).message === 'FILE_TOO_LARGE') return { sha256: '', size, head, truncated: true };
+    if (truncated || (e as Error).message === 'FILE_TOO_LARGE') return { sha256: '', size, head, truncated: true, rejected: false };
     throw e;
+  }
+  if (!accept({ size, head })) {
+    await rm(tmp, { force: true });
+    return { sha256: '', size, head, truncated: false, rejected: true };
   }
   const sha256 = hash.digest('hex');
   const target = blobPath(dir, clientId, sha256);
   await mkdir(path.dirname(target), { recursive: true });
   try { await stat(target); await rm(tmp, { force: true }); } catch { await rename(tmp, target); }
-  return { sha256, size, head, truncated: false };
+  return { sha256, size, head, truncated: false, rejected: false };
 }
 
 export async function storeBuffer(dir: string, clientId: string, buf: Buffer): Promise<Stored> {

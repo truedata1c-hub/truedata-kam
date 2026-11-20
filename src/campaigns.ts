@@ -92,14 +92,23 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
   let overdue = 0;
   for (const r of stageRows) { byStage[r.stage] = r.n; overdue += r.overdue; }
   const active = STAGES.filter((s) => s !== 'CANCELLED' && s !== 'CLOSED').reduce((a, s) => a + byStage[s], 0);
-  // Суммы — по текущим версиям показанных кампаний, без отменённых.
-  const counted = rows.filter((r) => r.stage !== 'CANCELLED' && r.version);
-  const investment = Math.round(counted.reduce((a, r) => a + r.investment, 0) * 100) / 100;
-  const turnover = Math.round(counted.reduce((a, r) => a + r.turnover, 0) * 100) / 100;
+  // Суммы — по текущим версиям всей выборки (не только первых 1000 строк), без отменённых.
+  const { rows: [sums] } = await ctx.db.query<{ n: number; total: number; investment: number; turnover: number }>(
+    `select count(*)::int total, count(v.number) filter (where c.stage <> 'CANCELLED')::int n,
+            coalesce(sum(v.total_investment) filter (where c.stage <> 'CANCELLED'), 0)::float8 investment,
+            coalesce(sum(v.total_turnover) filter (where c.stage <> 'CANCELLED'), 0)::float8 turnover
+       from kam.campaign c
+       left join lateral (select number, total_investment, total_turnover from kam.offer_version ov
+                           where ov.client_id = c.client_id and ov.campaign_id = c.id order by number desc limit 1) v on true
+       join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+      where ${where.join(' and ')}`, params);
+  const investment = Math.round(sums!.investment * 100) / 100;
+  const turnover = Math.round(sums!.turnover * 100) / 100;
   return {
     items: rows.map((r) => ({ ...r, roi: r.investment > 0 ? Math.round((r.turnover / r.investment) * 100) / 100 : null })),
     kpi: {
-      active, overdue, investment, turnover, roi: investment > 0 ? Math.round((turnover / investment) * 100) / 100 : null, with_versions: counted.length,
+      active, overdue, investment, turnover, roi: investment > 0 ? Math.round((turnover / investment) * 100) / 100 : null, with_versions: sums!.n,
+      total: sums!.total, truncated: sums!.total > rows.length,
       awaiting_decision: byStage.APPROVAL,
       approved: byStage.APPROVED + byStage.CONFIRMED + byStage.FINAL,
       by_stage: byStage,
@@ -114,7 +123,8 @@ async function loadVisible(ctx: Ctx, id: string, q: Pick<Tx, 'query'> = ctx.db) 
   const vis = campaignVisibility(ctx, 3);
   const { rows } = await q.query(
     `select c.*, n.name network_name, n.regions network_regions, t.name type_name, t.period_split, t.control_days,
-            u.display_name owner_name, u.email owner_email, cb.display_name created_by_name
+            u.display_name owner_name, u.email owner_email, cb.display_name created_by_name,
+            (c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL'])) is_overdue
        from kam.campaign c
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
        join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
@@ -140,9 +150,12 @@ function actionsFor(ctx: Ctx, c: { stage: Stage; owner_id: string }) {
   return a;
 }
 
-async function docRef(ctx: Ctx, id: string, at: string) {
+async function docRef(ctx: Ctx, id: string, at: string, versionId: string | null) {
   const d = (await ctx.db.query<{ id: string; file_name: string; kind: string; mime: string }>('select id, file_name, kind, mime from kam.document where client_id=$1 and id=$2', [ctx.clientId, id])).rows[0];
-  return d ? { ...d, at } : null;
+  const version = versionId
+    ? (await ctx.db.query<{ number: number }>('select number from kam.offer_version where client_id=$1 and id=$2', [ctx.clientId, versionId])).rows[0]?.number ?? null
+    : null;
+  return d ? { ...d, at, version } : null;
 }
 
 export async function getCampaign(ctx: Ctx, id: string) {
@@ -157,7 +170,7 @@ export async function getCampaign(ctx: Ctx, id: string) {
     `select e.id, e.kind, e.from_stage, e.to_stage, e.comment, e.payload, e.at, u.display_name actor_name
        from kam.campaign_event e left join kam.app_user u on u.id = e.actor
       where e.client_id = $1 and e.campaign_id = $2 order by e.at desc, e.id`, [ctx.clientId, c.id]);
-  const overdue = c.control_date < new Date().toISOString().slice(0, 10) && OPEN_STAGES.includes(c.stage);
+  const overdue = Boolean(c.is_overdue);
   return {
     data: {
       id: c.id, number: c.number, title: c.title, stage: c.stage, stage_changed_at: c.stage_changed_at, cancel_reason: c.cancel_reason,
@@ -167,8 +180,8 @@ export async function getCampaign(ctx: Ctx, id: string) {
       owner: { id: c.owner_id, name: c.owner_name, email: c.owner_email },
       created_by: c.created_by_name, created_at: c.created_at, updated_at: c.updated_at, revision: c.revision,
       legal_entities: entities, events, actions: actionsFor(ctx, c),
-      confirmation: c.confirmation_document_id ? await docRef(ctx, c.confirmation_document_id, c.confirmed_at) : null,
-      final_terms: c.final_document_id ? await docRef(ctx, c.final_document_id, c.finalized_at) : null,
+      confirmation: c.confirmation_document_id ? await docRef(ctx, c.confirmation_document_id, c.confirmed_at, c.confirmed_version_id) : null,
+      final_terms: c.final_document_id ? await docRef(ctx, c.final_document_id, c.finalized_at, c.final_version_id) : null,
     },
     etag: campaignEtag(c.id, c.revision),
   };
@@ -264,7 +277,10 @@ export async function updateCampaign(tx: Tx, ctx: Ctx, id: string, ifMatch: stri
   if (next.control_date > next.period_to) throw invalid('control_date', 'Контрольная дата позже окончания периода.');
   if (next.owner_id !== before.owner_id) await checkOwner(tx, ctx, next.owner_id, locked.network_id);
   await tx.query(
-    'update kam.campaign set title=$3, period_from=$4, period_to=$5, control_date=$6, owner_id=$7 where client_id=$1 and id=$2',
+    // Перенос контрольной даты снова включает уведомление о её просрочке.
+    `update kam.campaign set title=$3, period_from=$4, period_to=$5, control_date=$6, owner_id=$7,
+            control_overdue_notified_at = case when control_date is distinct from $6::date then null else control_overdue_notified_at end
+      where client_id=$1 and id=$2`,
     [ctx.clientId, id, next.title, next.period_from, next.period_to, next.control_date, next.owner_id]);
   let entities: string[] | undefined;
   if (b.legal_entity_ids !== undefined) {
@@ -326,10 +342,18 @@ export async function transition(tx: Tx, ctx: Ctx, id: string, ifMatch: string |
   await tx.query(
     'update kam.campaign set stage=$3, stage_changed_at=now(), cancel_reason=$4 where client_id=$1 and id=$2',
     [ctx.clientId, id, to, to === 'CANCELLED' ? comment : null]);
-  if (action === 'CONFIRM') await tx.query('update kam.campaign set confirmation_document_id=$3, confirmed_at=now() where client_id=$1 and id=$2', [ctx.clientId, id, doc!.id]);
-  if (action === 'FINALIZE') await tx.query('update kam.campaign set final_document_id=$3, finalized_at=now() where client_id=$1 and id=$2', [ctx.clientId, id, doc!.id]);
+  // Версия фиксируется вместе с документом этапа: подтверждённые сетью и финальные условия — это конкретная версия разбивки.
+  // После «Согласовано внутри» новые версии не создаются, поэтому последняя версия и есть согласованная.
+  let version: { id: string; number: number } | undefined;
+  if (action === 'CONFIRM' || action === 'FINALIZE') {
+    version = (await tx.query<{ id: string; number: number }>(
+      'select id, number from kam.offer_version where client_id=$1 and campaign_id=$2 order by number desc limit 1', [ctx.clientId, id])).rows[0];
+    if (!version) throw new ApiError(422, 'VERSION_REQUIRED', 'У кампании нет версии предложения.');
+  }
+  if (action === 'CONFIRM') await tx.query('update kam.campaign set confirmation_document_id=$3, confirmed_at=now(), confirmed_version_id=$4 where client_id=$1 and id=$2', [ctx.clientId, id, doc!.id, version!.id]);
+  if (action === 'FINALIZE') await tx.query('update kam.campaign set final_document_id=$3, finalized_at=now(), final_version_id=$4 where client_id=$1 and id=$2', [ctx.clientId, id, doc!.id, version!.id]);
   const rev = await bumpCampaign(tx, ctx, id);
-  await campaignEvent(tx, ctx, id, 'STAGE', { from: locked.stage, to, comment: comment || null, payload: doc ? { document_id: doc.id, file_name: doc.file_name } : undefined });
+  await campaignEvent(tx, ctx, id, 'STAGE', { from: locked.stage, to, comment: comment || null, payload: doc ? { document_id: doc.id, file_name: doc.file_name, version: version?.number } : undefined });
   if (action === 'CONFIRM') {
     // Сеть подтвердила условия: узнают согласовавшие и руководитель ответственного.
     const { rows } = await tx.query<{ u: string; title: string; network: string }>(
@@ -343,4 +367,39 @@ export async function transition(tx: Tx, ctx: Ctx, id: string, ifMatch: string |
   }
   await audit(tx, ctx, { entityType: 'campaign', entityId: id, action, before: { stage: locked.stage }, after: { stage: to }, reason: comment || null });
   return { status: 200, body: { id, stage: to, revision: rev }, etag: campaignEtag(id, rev) };
+}
+
+// Снимок финальных условий ------------------------------------------------------
+
+/**
+ * Финальное состояние кампании для выгрузки в систему исполнения контрактов (PharmaCheck): сеть, юрлица по ИНН,
+ * период, финальная версия с разбивкой бренд × период и файл финальных условий. Доступно после этапа «Финальные условия».
+ * Формат выгрузки в PharmaCheck ещё согласуется: это источник данных для неё, а не сам файл выгрузки.
+ */
+export async function finalSnapshot(ctx: Ctx, id: string) {
+  const c = await loadVisible(ctx, id);
+  if (!['FINAL', 'CLOSED'].includes(c.stage) || !c.final_version_id) {
+    throw new ApiError(409, 'NOT_FINAL', 'Финальные условия ещё не зафиксированы: кампания не на этапе «Финальные условия».');
+  }
+  const { rows: entities } = await ctx.db.query<{ inn: string; name: string }>(
+    `select le.inn, le.name from kam.campaign_legal_entity ce join kam.legal_entity le on le.client_id = ce.client_id and le.id = ce.legal_entity_id
+      where ce.client_id=$1 and ce.campaign_id=$2 order by le.name`, [ctx.clientId, c.id]);
+  const v = (await ctx.db.query<{ id: string; number: number; periods: { key: string; label: string; from: string; to: string }[]; investment: number; turnover: number; created_at: string }>(
+    `select id, number, periods, total_investment::float8 investment, total_turnover::float8 turnover, created_at
+       from kam.offer_version where client_id=$1 and id=$2`, [ctx.clientId, c.final_version_id])).rows[0]!;
+  const { rows: cells } = await ctx.db.query<{ brand_id: string; brand: string; period_key: string; investment: number; turnover: number }>(
+    `select x.brand_id, b.name brand, x.period_key, x.investment::float8 investment, x.turnover::float8 turnover
+       from kam.offer_version_cell x join kam.brand b on b.client_id = x.client_id and b.id = x.brand_id
+      where x.client_id=$1 and x.version_id=$2 order by b.name, x.period_key`, [ctx.clientId, v.id]);
+  const doc = (await ctx.db.query<{ id: string; file_name: string; kind: string; sha256: string }>(
+    'select id, file_name, kind, sha256 from kam.document where client_id=$1 and id=$2', [ctx.clientId, c.final_document_id])).rows[0] ?? null;
+  return {
+    campaign: { id: c.id, number: c.number, title: c.title, type: c.type_name, period_from: c.period_from, period_to: c.period_to, stage: c.stage, finalized_at: c.finalized_at },
+    network: { id: c.network_id, name: c.network_name },
+    legal_entities: entities,
+    owner: { id: c.owner_id, name: c.owner_name, email: c.owner_email },
+    version: { number: v.number, created_at: v.created_at, periods: v.periods, total_investment: v.investment, total_turnover: v.turnover, cells },
+    final_document: doc,
+    vat: 'NOT_SPECIFIED',
+  };
 }

@@ -2,6 +2,7 @@
 // кварталам и КАМ с прошлым периодом, «пульс переговоров». Всё — в пределах видимости пользователя;
 // бренд-менеджер видит детально только свои бренды, остальные — одной строкой «Прочие бренды».
 
+import { todayIso } from './time.js';
 import type { Tx } from './db.js';
 import { type Ctx, campaignVisibility, requirePermission } from './access.js';
 import { isUuid } from './commands.js';
@@ -50,7 +51,7 @@ async function brandScope(q: Q, ctx: Ctx): Promise<Set<string> | null> {
 
 export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
   requirePermission(ctx, 'ANALYTICS');
-  const year = q.year && /^\d{4}$/.test(q.year) ? Number(q.year) : new Date().getFullYear() + 1;
+  const year = q.year && /^\d{4}$/.test(q.year) ? Number(q.year) : Number(todayIso().slice(0, 4)) + 1;
   const vis = campaignVisibility(ctx, 3);
   const params: unknown[] = [ctx.clientId, year, ...vis.params];
   const push = (v: unknown) => { params.push(v); return `$${params.length}`; };
@@ -74,8 +75,27 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
       where ${W}`, params);
   const ids = camps.map((c) => c.id);
   const counted = camps.filter((c) => c.stage !== 'CANCELLED' && c.version_id);
-  const versionIds = counted.map((c) => c.version_id!);
+  const versionIds = camps.filter((c) => c.version_id).map((c) => c.version_id!);
   const byCamp = new Map(camps.map((c) => [c.id, c]));
+
+  // Единая методика: все суммы аналитики — доля текущей версии, приходящаяся на выбранный год.
+  // У годовых кампаний это вся сумма; у переходящих — только месяцы этого года. Прошлый период — те же кварталы годом раньше.
+  const { rows: cells } = versionIds.length ? await ctx.db.query<{ campaign_id: string; brand_id: string; brand: string; period_key: string; investment: number; turnover: number }>(
+    `select v.campaign_id, x.brand_id, b.name brand, x.period_key, x.investment::float8 investment, x.turnover::float8 turnover
+       from kam.offer_version_cell x join kam.offer_version v on v.client_id = x.client_id and v.id = x.version_id
+       join kam.brand b on b.client_id = x.client_id and b.id = x.brand_id
+      where x.client_id=$1 and x.version_id = any($2::uuid[])`, [ctx.clientId, versionIds]) : { rows: [] };
+  const inYear = new Map<string, { investment: number; turnover: number }>();
+  for (const x of cells) {
+    const c = byCamp.get(x.campaign_id)!;
+    const share = monthsOf(x.period_key, year, c.period_from, c.period_to).length / spanOf(x.period_key, c.period_from, c.period_to);
+    const a = inYear.get(c.id) ?? { investment: 0, turnover: 0 };
+    a.investment += x.investment * share;
+    a.turnover += x.turnover * share;
+    inYear.set(c.id, a);
+  }
+  const amt = (c: { id: string }) => inYear.get(c.id) ?? { investment: 0, turnover: 0 };
+  for (const c of camps) { c.investment = amt(c).investment; c.turnover = amt(c).turnover; }
 
   // Воронка ---------------------------------------------------------------
   const funnel = STAGES.map((s) => {
@@ -83,12 +103,7 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
     return { stage: s, count: list.length, investment: r2(list.reduce((a, c) => a + c.investment, 0)), turnover: r2(list.reduce((a, c) => a + c.turnover, 0)) };
   });
 
-  // Разбивка версий: бренд × месяц года ---------------------------------------
-  const { rows: cells } = versionIds.length ? await ctx.db.query<{ campaign_id: string; brand_id: string; brand: string; period_key: string; investment: number; turnover: number }>(
-    `select v.campaign_id, x.brand_id, b.name brand, x.period_key, x.investment::float8 investment, x.turnover::float8 turnover
-       from kam.offer_version_cell x join kam.offer_version v on v.client_id = x.client_id and v.id = x.version_id
-       join kam.brand b on b.client_id = x.client_id and b.id = x.brand_id
-      where x.client_id=$1 and x.version_id = any($2::uuid[])`, [ctx.clientId, versionIds]) : { rows: [] };
+  // Разбивка версий: бренд × месяц года (без отменённых кампаний) ---------------------
   const limit = await brandScope(ctx.db, ctx);
   const OTHER = 'other';
   const brandKey = (id: string) => (limit && !limit.has(id) ? OTHER : id);
@@ -101,6 +116,7 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
   const quarters = QUARTERS.map((label, i) => ({ quarter: i + 1, label, investment: 0, turnover: 0, prior_fact_investment: 0, prior_fact_turnover: 0 }));
   for (const x of cells) {
     const c = byCamp.get(x.campaign_id)!;
+    if (c.stage === 'CANCELLED') continue;
     const b = brandRow(x.brand_id, x.brand);
     const months = monthsOf(x.period_key, year, c.period_from, c.period_to);
     const share = months.length / spanOf(x.period_key, c.period_from, c.period_to);
@@ -113,7 +129,12 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
     }
   }
 
-  // Прошлый период: факт тех же сетей годом раньше ------------------------------------
+  // Прошлый период: факт тех же сетей в тех же кварталах годом раньше ---------------------
+  // Кампания по сети на II квартал сравнивается со II кварталом прошлого года, а не со всем годом.
+  const covered = new Set<string>();
+  for (const c of counted) {
+    for (const m of monthsOf('ALL', year, c.period_from, c.period_to)) covered.add(`${c.network_id}|${Math.floor((m - 1) / 3) + 1}`);
+  }
   const networkIds = [...new Set(counted.map((c) => c.network_id))];
   const { rows: prior } = networkIds.length ? await ctx.db.query<{ network_id: string; brand_id: string; brand: string; quarter: number; fi: number; ft: number; pt: number }>(
     `select p.network_id, p.brand_id, b.name brand, p.quarter, coalesce(p.fact_investment,0)::float8 fi, coalesce(p.fact_turnover,0)::float8 ft, coalesce(p.plan_turnover,0)::float8 pt
@@ -121,6 +142,7 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
       where p.client_id=$1 and p.year=$2 and p.network_id = any($3::uuid[])`, [ctx.clientId, year - 1, networkIds]) : { rows: [] };
   const priorByNet = new Map<string, { fi: number; ft: number }>();
   for (const p of prior) {
+    if (!covered.has(`${p.network_id}|${p.quarter}`)) continue;
     const b = brandRow(p.brand_id, p.brand);
     b.prior_fact_investment += p.fi; b.prior_fact_turnover += p.ft; b.prior_plan_turnover += p.pt;
     const qq = quarters[p.quarter - 1]!;

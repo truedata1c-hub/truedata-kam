@@ -1,6 +1,7 @@
 // Прошлые периоды (ТЗ §6.3): план и факт по сети × бренду × кварталу. Этап 1 — загрузка администратором из Excel;
 // этап 2 — автоматически из PharmaCheck по ИНН сети. Загрузка заменяет данные выбранного года целиком.
 
+import { todayIso } from './time.js';
 import type { FastifyRequest } from 'fastify';
 import type { Tx } from './db.js';
 import { withTx } from './db.js';
@@ -19,7 +20,7 @@ export async function summary(ctx: Ctx, year: unknown) {
   requirePermission(ctx, 'ADMIN');
   const { rows: years } = await ctx.db.query<{ year: number; rows: number; loaded_at: string }>(
     'select year, count(*)::int rows, max(loaded_at) loaded_at from kam.prior_period where client_id=$1 group by year order by year desc', [ctx.clientId]);
-  const y = year === undefined || year === '' ? years[0]?.year ?? new Date().getFullYear() - 1 : yearOf(year);
+  const y = year === undefined || year === '' ? years[0]?.year ?? Number(todayIso().slice(0, 4)) - 1 : yearOf(year);
   const { rows } = await ctx.db.query(
     `select n.id network_id, n.name network, count(distinct p.brand_id)::int brands,
             sum(p.plan_investment)::float8 plan_investment, sum(p.fact_investment)::float8 fact_investment,

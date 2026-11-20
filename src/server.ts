@@ -5,6 +5,7 @@ import { createPool, migrate } from './db.js';
 import { ssoConfigFromEnv } from './sso.js';
 import { upgradeDemo } from './demo.js';
 import { processOutbox, runSchedule } from './notify.js';
+import { housekeeping } from './housekeeping.js';
 
 const url = process.env.DATABASE_URL;
 if (!url) {
@@ -54,9 +55,17 @@ const scheduleTick = () => {
 const scheduleTimer = setInterval(scheduleTick, 5 * 60_000);
 setTimeout(scheduleTick, 20_000);
 
+// Очистка служебных таблиц — раз в час.
+const cleanTick = () => {
+  housekeeping(db).then((r) => { if (Object.values(r).some(Boolean)) app.log.info(r, 'housekeeping'); }).catch((e) => app.log.error(e, 'housekeeping failed'));
+};
+const cleanTimer = setInterval(cleanTick, 60 * 60_000);
+setTimeout(cleanTick, 60_000);
+
 const shutdown = async () => {
   clearInterval(mailTimer);
   clearInterval(scheduleTimer);
+  clearInterval(cleanTimer);
   await app.close();
   await db.end();
   process.exit(0);

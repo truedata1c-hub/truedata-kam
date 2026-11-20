@@ -10,10 +10,19 @@ const MONEY = '#,##0.00';
 export interface CellOut { brand_id: string; period_key: string; investment: number; turnover: number }
 export interface ParseIssue { row: number; column: string; message: string }
 
-function num(v: ExcelJS.CellValue): number | null | 'bad' {
+/**
+ * Число из ячейки. 'formula' — формула без сохранённого результата (файл собран программой и не открывался в Excel):
+ * такое значение нельзя молча считать нулём.
+ */
+function num(v: ExcelJS.CellValue): number | null | 'bad' | 'formula' {
   if (v === null || v === undefined || v === '') return null;
   if (typeof v === 'number') return v;
-  if (typeof v === 'object' && v && 'result' in v) return num((v as ExcelJS.CellFormulaValue).result as ExcelJS.CellValue);
+  if (typeof v === 'object' && v && ('formula' in v || 'sharedFormula' in v || 'result' in v)) {
+    const result = (v as ExcelJS.CellFormulaValue).result;
+    if (result === undefined || result === null) return 'formula';
+    if (typeof result === 'object' && 'error' in (result as object)) return 'bad';
+    return num(result as ExcelJS.CellValue);
+  }
   if (typeof v === 'string') {
     const s = v.replace(/[\s ₽]/g, '').replace(',', '.');
     if (!s) return null;
@@ -22,6 +31,8 @@ function num(v: ExcelJS.CellValue): number | null | 'bad' {
   }
   return 'bad';
 }
+
+const FORMULA_MESSAGE = 'Формула без вычисленного значения: откройте файл в Excel, сохраните и загрузите снова.';
 
 const text = (v: ExcelJS.CellValue) => (v === null || v === undefined ? '' : typeof v === 'object' && 'text' in (v as object) ? String((v as { text: unknown }).text) : String(v)).trim();
 
@@ -83,6 +94,7 @@ export async function parseVersion(buf: Buffer, periods: Period[], brands: { id:
   const byId = new Map(brands.map((b) => [b.id, b]));
   const byName = new Map(brands.map((b) => [b.name.toLowerCase(), b]));
   const cells = new Map<string, CellOut>();
+  const brandRow = new Map<string, number>();
   ws.eachRow((row, r) => {
     if (r < 3) return;
     const id = text(row.getCell(1).value);
@@ -94,6 +106,10 @@ export async function parseVersion(buf: Buffer, periods: Period[], brands: { id:
     for (const [col, meta] of cols) {
       const cell = row.getCell(col);
       const v = num(cell.value);
+      if (v === 'formula') {
+        issues.push({ row: r, column: cell.address.replace(/\d+$/, ''), message: FORMULA_MESSAGE });
+        continue;
+      }
       if (v === 'bad' || (typeof v === 'number' && (v < 0 || v > 1e12))) {
         issues.push({ row: r, column: cell.address.replace(/\d+$/, ''), message: `Не число или отрицательное значение: «${text(cell.value)}».` });
         continue;
@@ -102,6 +118,10 @@ export async function parseVersion(buf: Buffer, periods: Period[], brands: { id:
     }
     if (!any) return;
     if (!brand) { issues.push({ row: r, column: 'B', message: `Бренд «${name}» не найден в справочнике.` }); return; }
+    // Повтор бренда — ошибка, а не тихая перезапись первой строки.
+    const first = brandRow.get(brand.id);
+    if (first !== undefined) { issues.push({ row: r, column: 'B', message: `Бренд «${brand.name}» уже указан в строке ${first} — оставьте одну строку.` }); return; }
+    brandRow.set(brand.id, r);
     for (const x of vals) {
       const k = `${brand.id}|${x.period}`;
       const c = cells.get(k) ?? { brand_id: brand.id, period_key: x.period, investment: 0, turnover: 0 };
@@ -168,7 +188,8 @@ export async function parsePrior(buf: Buffer): Promise<{ rows: PriorRowOut[]; is
     const vals: (number | null)[] = [];
     for (let i = 0; i < 4; i++) {
       const v = num(row.getCell(5 + i).value);
-      if (v === 'bad' || (typeof v === 'number' && v < 0)) { issues.push({ row: r, column: String.fromCharCode(69 + i), message: 'Сумма — неотрицательное число.' }); vals.push(null); }
+      if (v === 'formula') { issues.push({ row: r, column: String.fromCharCode(69 + i), message: FORMULA_MESSAGE }); vals.push(null); }
+      else if (v === 'bad' || (typeof v === 'number' && (v < 0 || v > 1e12))) { issues.push({ row: r, column: String.fromCharCode(69 + i), message: 'Сумма — неотрицательное число не больше триллиона.' }); vals.push(null); }
       else vals.push(v === null ? null : Math.round(v * 100) / 100);
     }
     rows.push({ network, brand, year: Number(year), quarter: Number(quarter), plan_investment: vals[0]!, fact_investment: vals[1]!, plan_turnover: vals[2]!, fact_turnover: vals[3]!, row: r });

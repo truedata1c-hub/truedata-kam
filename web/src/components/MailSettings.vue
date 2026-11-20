@@ -34,7 +34,7 @@
             <td><span class="cellSub" style="max-width: 380px">{{ m.subject }}</span></td>
             <td><span class="pill" :class="STATUS[m.status]?.tone">{{ STATUS[m.status]?.label }}</span>
               <div v-if="m.attempts" class="cellSub">попыток: {{ m.attempts }}</div><div v-if="m.last_error" class="cellSub" :title="m.last_error">{{ m.last_error }}</div></td>
-            <td class="actionCell"><button v-if="['FAILED', 'RETRY'].includes(m.status)" class="linkBtn" @click="retry(m.id)">Повторить</button></td>
+            <td class="actionCell"><button v-if="['FAILED', 'RETRY', 'EXPIRED'].includes(m.status)" class="linkBtn" @click="retry(m.id)">Повторить</button></td>
           </tr>
           <tr v-if="!(data?.recent ?? []).length"><td colspan="5" class="muted">Писем пока нет.</td></tr>
         </tbody>
@@ -56,6 +56,7 @@ interface Mail { smtp: { host: string; port: number; secure: boolean; user: stri
 const STATUS: Record<string, { label: string; tone: string }> = {
   NO_CHANNEL: { label: 'канал не настроен', tone: 'gray' }, QUEUED: { label: 'в очереди', tone: 'amber' }, SENDING: { label: 'отправляется', tone: 'amber' },
   SENT: { label: 'отправлено', tone: 'green' }, RETRY: { label: 'повтор', tone: 'amber' }, FAILED: { label: 'не доставлено', tone: 'red' },
+  EXPIRED: { label: 'устарело, не отправлено', tone: 'gray' },
 };
 const $q = useQuasar();
 const data = ref<Mail | null>(null);
@@ -67,8 +68,12 @@ async function load() {
   if (s) Object.assign(form, { host: s.host, port: s.port, secure: s.secure, user: s.user, from: s.from, password: '' });
 }
 async function save() {
-  const r = await run(() => api.put<{ released: number }>(`${base()}/mail`, form));
-  if (r) { $q.notify({ type: 'positive', message: `Почта подключена${r.data.released ? `, в отправку ушло писем: ${r.data.released}` : ''}` }); await load(); }
+  const r = await run(() => api.put<{ released: number; expired?: number }>(`${base()}/mail`, form));
+  if (r) {
+    const parts = [r.data.released ? `в отправку ушло писем: ${r.data.released}` : '', r.data.expired ? `устаревших (старше 3 суток) не отправлено: ${r.data.expired}` : ''].filter(Boolean);
+    $q.notify({ type: 'positive', message: `Почта подключена${parts.length ? ', ' + parts.join('; ') : ''}` });
+    await load();
+  }
 }
 async function disable() { if (await run(() => api.put(`${base()}/mail`, { disabled: true }))) { $q.notify({ type: 'positive', message: 'Почтовый канал отключён' }); await load(); } }
 async function test() {
