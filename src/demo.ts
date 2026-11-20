@@ -3,6 +3,7 @@
 // бренды вымышлены. Генерация детерминирована, повторный запуск с --reset воспроизводит тот же набор.
 
 import { randomUUID } from 'node:crypto';
+import { todayIso } from './time.js';
 import type { Db, Tx } from './db.js';
 import { withTx } from './db.js';
 import { hashPassword } from './auth.js';
@@ -105,7 +106,7 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
   const domain = opts.domain ?? 'demo.truedata.tech';
   const r = rng(20271117);
   const pick = <T>(a: readonly T[]) => a[Math.floor(r() * a.length)]!;
-  const today = opts.today ?? new Date().toISOString().slice(0, 10);
+  const today = opts.today ?? todayIso();
   const day = (offset: number) => new Date(Date.parse(today + 'T00:00:00Z') + offset * 86400_000).toISOString().slice(0, 10);
   const passwordHash = await hashPassword(opts.password);
 
@@ -268,7 +269,7 @@ export async function seedDemo(db: Db, opts: { password: string; domain?: string
 async function purgeClient(tx: Tx, clientId: string) {
   await tx.query('alter table kam.audit_event disable trigger audit_event_no_update');
   await tx.query("select set_config('kam.purge', 'on', true)");
-  await tx.query('update kam.campaign set confirmation_document_id=null, final_document_id=null where client_id=$1', [clientId]);
+  await tx.query('update kam.campaign set confirmation_document_id=null, final_document_id=null, confirmed_version_id=null, final_version_id=null where client_id=$1', [clientId]);
   for (const t of ['email_outbox', 'notification', 'notification_pref', 'campaign_comment', 'activity', 'network_contact', 'approval_step', 'approval', 'route_rule', 'route_template', 'substitution', 'offer_version_document', 'offer_version_brand_note', 'offer_version_cell', 'offer_version', 'document', 'prior_period', 'client_setting', 'campaign_event', 'campaign_legal_entity', 'campaign', 'campaign_counter', 'kam_assignment', 'legal_entity', 'network', 'network_group',
     'user_brand', 'brand', 'user_manager', 'user_business_role', 'business_role', 'campaign_type', 'idempotency_request', 'audit_event', 'membership']) {
     await tx.query(`delete from kam.${t} where client_id = $1`, [clientId]);
@@ -640,6 +641,12 @@ async function seedCommunications(tx: Tx, o: {
         [o.clientId, id, c.id, kind, name, mimeOf(name), stored.size, stored.sha256, kind === 'FINAL_TERMS' ? 'CONFIRMED' : 'APPROVED', c.owner, at]);
       await tx.query(`update kam.campaign set ${col} = $3, ${col === 'final_document_id' ? 'finalized_at' : 'confirmed_at'} = $4 where client_id=$1 and id=$2`, [o.clientId, c.id, id, at]);
     }
+  }
+  // Подтверждённая и финальная версия — последняя версия кампании (после «Согласовано внутри» версии не меняются).
+  for (const [col, doc] of [['confirmed_version_id', 'confirmation_document_id'], ['final_version_id', 'final_document_id']] as const) {
+    await tx.query(
+      `update kam.campaign c set ${col} = (select v.id from kam.offer_version v where v.client_id = c.client_id and v.campaign_id = c.id order by v.number desc limit 1)
+        where c.client_id=$1 and c.${doc} is not null`, [o.clientId]);
   }
 
   // Центр уведомлений: шаги, которые ждут решения, и возвраты на доработку.

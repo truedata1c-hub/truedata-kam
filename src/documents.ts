@@ -54,10 +54,11 @@ export async function upload(ctx: Ctx, campaignId: string, req: FastifyRequest):
   const comment = field('comment').trim();
   if (comment.length > 1000) throw invalid('comment', 'Не длиннее 1000 символов.');
   const name = safeName(part.filename || 'file');
-  const stored = await storeStream(filesDir(), ctx.clientId, part.file);
+  // Пустой и запрещённый файл отклоняется до переноса в хранилище — на диске не остаётся неучтённых файлов.
+  const stored = await storeStream(filesDir(), ctx.clientId, part.file, MAX_FILE_BYTES, (f) => !part.file.truncated && f.size > 0 && !blocked(name, f.head));
   if (stored.truncated || part.file.truncated) throw new ApiError(413, 'FILE_TOO_LARGE', 'Файл больше 50 МБ.', {}, 'file');
   if (!stored.size) throw invalid('file', 'Файл пустой.');
-  if (blocked(name, stored.head)) throw invalid('file', 'Исполняемые файлы и веб-страницы не принимаются.', 'FILE_TYPE_BLOCKED');
+  if (stored.rejected) throw invalid('file', 'Исполняемые файлы и веб-страницы не принимаются.', 'FILE_TYPE_BLOCKED');
 
   return withTx(ctx.db, async (tx) => {
     const locked = (await tx.query<{ stage: string }>('select stage from kam.campaign where client_id=$1 and id=$2 for update', [ctx.clientId, campaignId])).rows[0]!;

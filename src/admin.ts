@@ -1,6 +1,7 @@
 // Администрирование клиента (ТЗ §3, §8): конструктор ролей, пользователи и оргструктура, сети и юрлица,
 // бренды, типы кампаний, журнал. Все команды — с журналом в той же транзакции.
 
+import { todayIso } from './time.js';
 import { randomUUID } from 'node:crypto';
 import type { Tx } from './db.js';
 import { ApiError, invalid, notFound, required } from './errors.js';
@@ -21,7 +22,7 @@ const date = (v: unknown, field: string, opt = false): string | null => {
   if (typeof v !== 'string' || !DATE.test(v)) throw invalid(field, 'Укажите дату в формате ГГГГ-ММ-ДД.');
   return v;
 };
-const today = () => new Date().toISOString().slice(0, 10);
+const today = () => todayIso();
 
 /** Контрольное число ИНН (10 или 12 цифр) по правилам ФНС. */
 export function innValid(inn: string): boolean {
@@ -186,9 +187,21 @@ export async function updateUser(tx: Tx, ctx: Ctx, userId: string, b: Record<str
   return { status: 200, body: { id: userId } };
 }
 
+/**
+ * Временный пароль. Учётная запись общая для всех компаний модуля, поэтому администратор компании сбрасывает пароль
+ * только сотрудникам, которые работают лишь в его компании: иначе он получил бы вход в данные другой компании.
+ * Сотруднику, который хоть раз входил из платформы, пароль модуля не выдаётся: его вход контролирует платформа,
+ * и пароль модуля позволил бы обойти отключение в ней. Пароль такому сотруднику задаёт только администратор стенда (cli).
+ */
 export async function resetPassword(tx: Tx, ctx: Ctx, userId: string): Promise<CommandResult> {
   requirePermission(ctx, 'ADMIN');
   await lockMember(tx, ctx, userId);
+  const u = (await tx.query<{ others: number; sso: boolean }>(
+    `select (select count(*)::int from kam.membership m where m.user_id = u.id and m.client_id <> $2) others,
+            exists (select 1 from kam.external_identity x where x.user_id = u.id) sso
+       from kam.app_user u where u.id = $1 for update`, [userId, ctx.clientId])).rows[0]!;
+  if (u.others) throw new ApiError(422, 'USER_SHARED', 'Сотрудник работает и в других компаниях модуля — его пароль сбрасывает администратор стенда.');
+  if (u.sso) throw new ApiError(422, 'SSO_USER', 'Сотрудник входит из платформы — пароль модуля ему не выдаётся: вход контролирует платформа.');
   const temp = temporaryPassword();
   await tx.query('update kam.app_user set password_hash=$2, must_change_password=true where id=$1', [userId, await hashPassword(temp)]);
   await tx.query("delete from kam.session where user_id=$1 and via='PASSWORD'", [userId]);

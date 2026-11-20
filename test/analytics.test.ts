@@ -18,10 +18,12 @@ test('аналитика: суммы сходятся между разреза�
   const quarters = d.by_quarter.reduce((a: number, q: any) => a + q.investment, 0);
   const nets = d.by_network.reduce((a: number, n: any) => a + n.investment, 0);
   assert.ok(d.kpi.investment > 0);
-  // Сети — полные суммы версий; бренды и кварталы — доля, приходящаяся на 2027 год (у годовых кампаний совпадает).
+  // Единая методика: все разрезы — доля версий, приходящаяся на 2027 год, поэтому суммы совпадают между разрезами.
   assert.ok(near(nets, d.kpi.investment), `${nets} vs ${d.kpi.investment}`);
   assert.ok(near(brands, quarters), `${brands} vs ${quarters}`);
-  assert.ok(brands <= d.kpi.investment + 1);
+  assert.ok(near(brands, d.kpi.investment), `${brands} vs ${d.kpi.investment}`);
+  const owners = d.by_owner.reduce((a: number, o: any) => a + o.investment, 0);
+  assert.ok(near(owners, d.kpi.investment), `${owners} vs ${d.kpi.investment}`);
   const portfolio = (await call(`${C(env)}/campaigns`, { as: 'olga.morozova', query: { year: '2027', stage: 'ALL' } })).json;
   for (const f of d.funnel) assert.equal(f.count, portfolio.items.filter((c: any) => c.stage === f.stage).length, f.stage);
   assert.ok(d.timing.find((t: any) => t.stage === 'NEGOTIATION').avg_days > 0);
@@ -81,4 +83,31 @@ test('резервные копии: администратор видит по�
     assert.equal(r.json.stale, false);
     assert.equal((await call(`${C(env)}/backups`, { as: 'olga.morozova' })).status, 403);
   } finally { delete process.env.BACKUP_DIR; }
+});
+
+test('аналитика: переходящая кампания учитывается долей года во всех разрезах', async () => {
+  const one = async (sql: string, p: unknown[] = []) => (await env.db.query(sql, p)).rows[0];
+  const before27 = (await get('anna.smirnova')).json.kpi;
+  const before28 = (await get('anna.smirnova', { year: '2028' })).json.kpi;
+  const r = await call(`${C(env)}/campaigns`, { as: 'anna.smirnova', body: {
+    network_id: (await one("select id from kam.network where name='Ригла'")).id, type_id: (await one("select id from kam.campaign_type where name='Разовая акция'")).id,
+    title: 'Переходящая акция', period_from: '2027-12-01', period_to: '2028-01-31' } });
+  assert.equal(r.status, 201, r.body);
+  const card = await call(`${C(env)}/campaigns/${r.json.id}`, { as: 'anna.smirnova' });
+  const moved = await call(`${C(env)}/campaigns/${r.json.id}/transitions`, { as: 'anna.smirnova', ifMatch: card.etag, body: { action: 'START_NEGOTIATION' } });
+  const brand = (await one("select id from kam.brand where name='Кардиовел'")).id;
+  const v = await call(`${C(env)}/campaigns/${r.json.id}/versions`, { as: 'anna.smirnova', ifMatch: moved.etag, body: { cells: [
+    { brand_id: brand, period_key: '2027-M12', investment: 100000, turnover: 500000 },
+    { brand_id: brand, period_key: '2028-M01', investment: 300000, turnover: 900000 },
+  ] } });
+  assert.equal(v.status, 201, v.body);
+  const after27 = (await get('anna.smirnova')).json;
+  const after28 = (await get('anna.smirnova', { year: '2028' })).json;
+  assert.ok(near(after27.kpi.investment - before27.investment, 100000), `${after27.kpi.investment - before27.investment}`);
+  assert.ok(near(after28.kpi.investment - before28.investment, 300000), `${after28.kpi.investment - before28.investment}`);
+  // Сети, КАМ и воронка — та же доля года, что и бренды.
+  const nets = after27.by_network.reduce((a: number, n: any) => a + n.investment, 0);
+  assert.ok(near(nets, after27.kpi.investment));
+  const negotiation = after27.funnel.find((f: any) => f.stage === 'NEGOTIATION');
+  assert.ok(negotiation.investment >= 100000);
 });

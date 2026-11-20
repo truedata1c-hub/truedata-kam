@@ -122,8 +122,9 @@ export async function audit(tx: Tx, ctx: Ctx, e: AuditInput): Promise<void> {
 export async function campaignEvent(tx: Tx, ctx: Ctx, campaignId: string, kind: string,
   o: { from?: string | null; to?: string | null; comment?: string | null; payload?: unknown } = {}): Promise<void> {
   await tx.query(
-    `insert into kam.campaign_event(client_id, id, campaign_id, kind, from_stage, to_stage, comment, payload, actor)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+    // clock_timestamp, а не now(): события одной транзакции (например, два перехода этапа подряд) упорядочены по времени.
+    `insert into kam.campaign_event(client_id, id, campaign_id, kind, from_stage, to_stage, comment, payload, actor, at)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9, clock_timestamp())`,
     [ctx.clientId, randomUUID(), campaignId, kind, o.from ?? null, o.to ?? null, o.comment ?? null,
       o.payload === undefined ? null : JSON.stringify(o.payload), ctx.principal.userId]);
 }

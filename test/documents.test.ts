@@ -54,6 +54,17 @@ test('Excel не открывается в браузере, а скачивае
   assert.equal((await upload('anna.smirnova', id, { name: 'setup.exe', content: Buffer.from('MZ....') })).json.error.code, 'FILE_TYPE_BLOCKED');
   assert.equal((await upload('anna.smirnova', id, { name: 'отчёт.pdf', content: Buffer.from('MZ\u0090\u0000 disguised') })).json.error.code, 'FILE_TYPE_BLOCKED');
   assert.equal((await upload('anna.smirnova', id, { name: 'page.html', content: Buffer.from('<script>') })).json.error.code, 'FILE_TYPE_BLOCKED');
+  // Отклонённые файлы не остаются в хранилище: на диске только файлы принятых документов.
+  const { readdir } = await import('node:fs/promises');
+  const path = await import('node:path');
+  const { createHash } = await import('node:crypto');
+  const walk = async (dir: string): Promise<string[]> => (await Promise.all((await readdir(dir, { withFileTypes: true }))
+    .map((e) => (e.isDirectory() ? walk(path.join(dir, e.name)) : Promise.resolve([e.name]))))).flat();
+  const blobs = await walk(path.join(process.env.FILES_DIR!, env.demo));
+  for (const bad of ['MZ....', 'MZ\u0090\u0000 disguised', '<script>']) {
+    assert.ok(!blobs.includes(createHash('sha256').update(Buffer.from(bad)).digest('hex')), bad);
+  }
+  assert.equal((await upload('anna.smirnova', id, { name: 'пустой.pdf', content: Buffer.alloc(0) })).json.error.field, 'file');
   assert.equal((await upload('anna.smirnova', id, { name: 'x.pdf', content: PDF }, { kind: 'WHATEVER' })).json.error.field, 'kind');
 });
 

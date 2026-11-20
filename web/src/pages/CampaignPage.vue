@@ -31,8 +31,8 @@
         </div>
       </div>
       <div v-if="c.confirmation || c.final_terms" class="stageDocs">
-        <span v-if="c.confirmation"><Icon id="check-done-01" :size="14" />Подтверждение сети: <a :href="docUrl(c.confirmation.id)" class="docLink">{{ c.confirmation.file_name }}</a> · {{ fmtDate(c.confirmation.at) }}</span>
-        <span v-if="c.final_terms"><Icon id="file-05" :size="14" />Финальные условия: <a :href="docUrl(c.final_terms.id)" class="docLink">{{ c.final_terms.file_name }}</a> · {{ fmtDate(c.final_terms.at) }}</span>
+        <span v-if="c.confirmation"><Icon id="check-done-01" :size="14" />Подтверждение сети: <a :href="docUrl(c.confirmation.id)" class="docLink">{{ c.confirmation.file_name }}</a> · {{ fmtDate(c.confirmation.at) }}<template v-if="c.confirmation.version"> · версия {{ c.confirmation.version }}</template></span>
+        <span v-if="c.final_terms"><Icon id="file-05" :size="14" />Финальные условия: <a :href="docUrl(c.final_terms.id)" class="docLink">{{ c.final_terms.file_name }}</a> · {{ fmtDate(c.final_terms.at) }}<template v-if="c.final_terms.version"> · версия {{ c.final_terms.version }}</template></span>
       </div>
       <div v-if="c.stage === 'CANCELLED'" class="banner error" style="margin-top: 10px"><Icon id="x-circle" :size="15" /><span><b>Кампания отменена.</b> {{ c.cancel_reason }}</span></div>
       <div v-else-if="c.stage === 'CLOSED'" class="banner info" style="margin-top: 10px"><Icon id="check-circle" :size="15" /><span>Кампания закрыта: условия переданы в контроль исполнения.</span></div>
