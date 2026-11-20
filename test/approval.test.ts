@@ -195,15 +195,9 @@ test('сценарии 2, 9 и 10: роль из конструктора в ш�
 
   assert.equal((await decide('elena.sokolova', cid, 'APPROVE')).status, 200);
   // Сценарий 10: Илья в отпуске, замещает Алексей; Алексей видит шаг и решает «за Илью».
-  // Заместителем можно назначить только сотрудника с правом «Согласовывать»: у КАМ Алексея его пока нет.
-  const alexey = await userId('alexey.novikov');
-  const noRight = await call(`${C(env)}/substitutions`, { as: 'ilya.ivanov', body: { deputy_id: alexey, from: '2026-01-01', to: '2030-12-31', comment: 'Отпуск' } });
-  assert.equal(noRight.json.error.code, 'DEPUTY_CANNOT_APPROVE');
-  const alexeyRoles = (await call(`${C(env)}/users`, { as: 'admin' })).json.items.find((u: any) => u.id === alexey).role_ids;
-  assert.equal((await call(`${C(env)}/users/${alexey}`, { method: 'PATCH', as: 'admin', body: { role_ids: [...alexeyRoles, role.json.id] } })).status, 200);
-  const sub = await call(`${C(env)}/substitutions`, { as: 'ilya.ivanov', body: { deputy_id: alexey, from: '2026-01-01', to: '2030-12-31', comment: 'Отпуск' } });
+  const sub = await call(`${C(env)}/substitutions`, { as: 'ilya.ivanov', body: { deputy_id: await userId('alexey.novikov'), from: '2026-01-01', to: '2030-12-31', comment: 'Отпуск' } });
   assert.equal(sub.status, 201, sub.body);
-  const overlap = await call(`${C(env)}/substitutions`, { as: 'ilya.ivanov', body: { deputy_id: await userId('natalia.popova'), from: '2027-01-01', to: '2027-01-10' } });
+  const overlap = await call(`${C(env)}/substitutions`, { as: 'ilya.ivanov', body: { deputy_id: await userId('tatiana.lebedeva'), from: '2027-01-01', to: '2027-01-10' } });
   assert.equal(overlap.json.error.code, 'PERIOD_OVERLAP');
   const notMine = await call(`${C(env)}/substitutions`, { as: 'ilya.ivanov', body: { user_id: await userId('anna.smirnova'), deputy_id: ilya, from: '2027-01-01', to: '2027-01-10' } });
   assert.equal(notMine.status, 403);
@@ -253,9 +247,16 @@ test('демо-набор: идущие согласования с исполн
   assert.equal(bad.n, 0);
 });
 
-test('снятое право «Согласовывать» снимает и право решить замороженный шаг', async () => {
+test('замещение передаёт право решать любому сотруднику; снятое право исполнителя снимает его и с заместителя', async () => {
   const cid = await campaignWithVersion('anna.smirnova', 'АСНА', 'Годовые условия', 1_000_000);
   assert.equal((await submit('anna.smirnova', cid)).status, 201);
+  // Руководитель КАМ Елена на время отпуска поручает подтверждать заявки КАМ Дмитрию (у него нет права «Согласовывать»).
+  const dmitry = await userId('dmitry.petrov');
+  const sub = await call(`${C(env)}/substitutions`, { as: 'elena.sokolova', body: { deputy_id: dmitry, from: '2026-01-01', to: '2030-12-31', comment: 'Отпуск' } });
+  assert.equal(sub.status, 201, sub.body);
+  assert.equal((await call(`${C(env)}/my-decisions/count`, { as: 'dmitry.petrov' })).json.pending >= 1, true);
+  assert.equal((await approvalOf('dmitry.petrov', cid)).my_decision.for_user, 'Елена Соколова');
+
   const elena = await userId('elena.sokolova');
   const users = (await call(`${C(env)}/users`, { as: 'admin' })).json.items;
   const roles = users.find((u: any) => u.id === elena).role_ids;
@@ -266,8 +267,14 @@ test('снятое право «Согласовывать» снимает и �
     assert.equal(r.status, 403, r.body);
     assert.equal((await call(`${C(env)}/my-decisions/count`, { as: 'elena.sokolova' })).json.pending, 0);
     assert.equal((await approvalOf('elena.sokolova', cid)).my_decision, null);
+    // Заместитель решает за Елену только пока у неё самой есть право.
+    assert.equal((await decide('dmitry.petrov', cid, 'APPROVE')).status, 403);
+    assert.equal((await call(`${C(env)}/my-decisions`, { as: 'dmitry.petrov' })).json.items.some((x: any) => x.campaign_id === cid), false);
   } finally {
     assert.equal((await call(`${C(env)}/users/${elena}`, { method: 'PATCH', as: 'admin', body: { role_ids: roles } })).status, 200);
   }
-  assert.equal((await decide('elena.sokolova', cid, 'APPROVE')).status, 200);
+  const ok = await decide('dmitry.petrov', cid, 'APPROVE', 'За Елену');
+  assert.equal(ok.status, 200, ok.body);
+  const step = (await approvalOf('anna.smirnova', cid)).rounds[0].steps[0];
+  assert.deepEqual([step.decided_by_name, step.decided_for_name], ['Дмитрий Петров', 'Елена Соколова']);
 });

@@ -121,4 +121,7 @@ test('сброс пароля не даёт доступа к другой ко�
   const ok = await call(`${C(env)}/users/${own.json.id}/password-reset`, { as: 'admin', body: {} });
   assert.equal(ok.status, 200, ok.body);
   assert.match(ok.json.temporary_password, /^[A-Za-z0-9]{16}$/);
+  // После первого входа из платформы пароль ему уже не выдаётся, даже если он у него был.
+  await env.db.query("insert into kam.external_identity(issuer, subject, user_id) values ('test-platform', 'p-2', $1)", [own.json.id]);
+  assert.equal((await call(`${C(env)}/users/${own.json.id}/password-reset`, { as: 'admin', body: {} })).json.error.code, 'SSO_USER');
 });
