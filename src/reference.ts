@@ -2,6 +2,7 @@
 
 import { type Ctx, seesAll, visibleNetworkIds } from './access.js';
 import { notFound } from './errors.js';
+import { APP_TZ } from './time.js';
 import { isUuid } from './commands.js';
 
 export async function reference(ctx: Ctx) {
@@ -22,7 +23,7 @@ export async function reference(ctx: Ctx) {
        join kam.user_business_role ur on ur.client_id = m.client_id and ur.user_id = m.user_id
        join kam.business_role r on r.client_id = ur.client_id and r.id = ur.role_id and not r.archived and 'CAMPAIGN_EDIT' = any(r.permissions)
       where m.client_id = $1 and m.active and ($2::uuid[] is null or u.id = any($2::uuid[])) order by name`, [ctx.clientId, users]);
-  // Кому можно назначить новую кампанию и за какими сетями он закреплён.
+  // Сети, в которых пользователь может создавать кампании, и их текущие ответственные.
   const p = ctx.access.permissions;
   const candidates = [...new Set([...(p.has('CAMPAIGN_EDIT') ? [ctx.principal.userId] : []), ...(p.has('CAMPAIGN_EDIT_SUBORDINATES') ? ctx.access.team : [])])];
   const { rows: assignable } = candidates.length ? await ctx.db.query(
@@ -33,7 +34,7 @@ export async function reference(ctx: Ctx) {
         and exists (select 1 from kam.user_business_role ur join kam.business_role r on r.client_id = ur.client_id and r.id = ur.role_id
                      where ur.client_id = ka.client_id and ur.user_id = ka.user_id and not r.archived and 'CAMPAIGN_EDIT' = any(r.permissions))
       group by u.id, u.display_name order by (u.id = $3) desc, u.display_name`, [ctx.clientId, candidates, ctx.principal.userId]) : { rows: [] };
-  return { networks, groups, types, brands, owners, assignable };
+  return { networks, groups, types, brands, owners, assignable, time_zone: APP_TZ };
 }
 
 /** Юрлица сети для формы кампании — только для сетей в области видимости. */

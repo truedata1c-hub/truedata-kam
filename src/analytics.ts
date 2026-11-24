@@ -62,13 +62,13 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
   const W = where.join(' and ');
 
   const { rows: camps } = await ctx.db.query<{
-    id: string; stage: string; network_id: string; network: string; owner_id: string; owner: string; period_from: string; period_to: string;
+    id: string; stage: string; network_id: string; network: string; owner_id: string | null; owner: string; period_from: string; period_to: string;
     overdue: boolean; version_id: string | null; investment: number; turnover: number; stage_changed_at: string;
   }>(
-    `select c.id, c.stage, c.network_id, n.name network, c.owner_id, u.display_name owner, c.period_from::text period_from, c.period_to::text period_to,
+    `select c.id, c.stage, c.network_id, n.name network, c.owner_id, coalesce(u.display_name, 'КАМ не назначен') owner, c.period_from::text period_from, c.period_to::text period_to,
             (c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL'])) overdue,
             v.id version_id, coalesce(v.total_investment, 0)::float8 investment, coalesce(v.total_turnover, 0)::float8 turnover, c.stage_changed_at
-       from kam.campaign c join kam.network n on n.client_id = c.client_id and n.id = c.network_id join kam.app_user u on u.id = c.owner_id
+       from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id left join kam.app_user u on u.id = c.owner_id
        left join lateral (select id, total_investment, total_turnover from kam.offer_version ov where ov.client_id = c.client_id and ov.campaign_id = c.id
                           order by number desc limit 1) v on true
       where ${W}`, params);
@@ -141,7 +141,7 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
 
   // Сети и КАМ -------------------------------------------------------------------
   const nets = new Map<string, { network_id: string; name: string; campaigns: number; investment: number; turnover: number; overdue: number }>();
-  const owners = new Map<string, { owner_id: string; name: string; campaigns: number; active: number; approved: number; investment: number; turnover: number; overdue: number }>();
+  const owners = new Map<string | null, { owner_id: string | null; name: string; campaigns: number; active: number; approved: number; investment: number; turnover: number; overdue: number }>();
   for (const c of camps) {
     if (c.stage === 'CANCELLED') continue;
     const n = nets.get(c.network_id) ?? { network_id: c.network_id, name: c.network, campaigns: 0, investment: 0, turnover: 0, overdue: 0 };

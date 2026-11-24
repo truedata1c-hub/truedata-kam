@@ -17,14 +17,14 @@ const money = (v: unknown) => Math.round(Number(v) * 100) / 100;
 
 type Q = Pick<Tx, 'query'>;
 
-interface CampaignRow { id: string; owner_id: string; network_id: string; stage: string; period_from: string; period_to: string; period_split: Split }
+interface CampaignRow { id: string; owner_id: string | null; network_id: string; stage: string; period_from: string; period_to: string; period_split: Split }
 
 async function campaignFor(q: Q, ctx: Ctx, id: string): Promise<CampaignRow> {
   if (!isUuid(id)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
   const { rows } = await q.query<CampaignRow>(
     `select c.id, c.owner_id, c.network_id, c.stage, c.period_from, c.period_to, t.period_split
-       from kam.campaign c join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
+       from kam.campaign_with_owner c join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
       where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, id, ...vis.params]);
   if (!rows[0]) throw notFound();
   return rows[0];
@@ -190,7 +190,7 @@ async function priorFor(q: Q, clientId: string, networkId: string, from: string,
 }
 
 /** Бренд-менеджер (область «свои бренды», без права вести кампанию) видит свои бренды подробно, остальные — итогом. */
-async function brandLimit(q: Q, ctx: Ctx, ownerId: string): Promise<Set<string> | null> {
+async function brandLimit(q: Q, ctx: Ctx, ownerId: string | null): Promise<Set<string> | null> {
   const s = ctx.access.scopes;
   if (!s.has('BRANDS') || s.has('ALL') || s.has('SUBORDINATES') || canEditFor(ctx, ownerId)) return null;
   const { rows } = await q.query<{ brand_id: string }>('select brand_id from kam.user_brand where client_id=$1 and user_id=$2', [ctx.clientId, ctx.principal.userId]);

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { Tx } from './db.js';
 import { ApiError, forbidden, invalid, notFound, required } from './errors.js';
 import { type Ctx, campaignVisibility, canEditFor, visibleNetworkIds } from './access.js';
-import { type CommandResult, audit, campaignEvent, isUuid } from './commands.js';
+import { type CommandResult, audit, campaignEvent, isUuid, lockCampaignRecord } from './commands.js';
 import { canSee, directory, routeCampaign } from './routes.js';
 import { notify } from './notify.js';
 
@@ -20,8 +20,8 @@ const str = (v: unknown, field: string, max: number, need = false) => {
 async function campaignOf(q: Q, ctx: Ctx, id: string) {
   if (!isUuid(id)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
-  const c = (await q.query<{ id: string; owner_id: string; network_id: string; stage: string; title: string; network: string }>(
-    `select c.id, c.owner_id, c.network_id, c.stage, c.title, n.name network from kam.campaign c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+  const c = (await q.query<{ id: string; owner_id: string | null; network_id: string; stage: string; title: string; network: string }>(
+    `select c.id, c.owner_id, c.network_id, c.stage, c.title, n.name network from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
       where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, id, ...vis.params])).rows[0];
   if (!c) throw notFound();
   return c;
@@ -31,15 +31,18 @@ async function campaignOf(q: Q, ctx: Ctx, id: string) {
 
 async function networkAccess(q: Q, ctx: Ctx, networkId: string): Promise<{ edit: boolean }> {
   if (!isUuid(networkId)) throw notFound();
-  if (!(await q.query('select 1 from kam.network where client_id=$1 and id=$2', [ctx.clientId, networkId])).rowCount) throw notFound();
-  const nets = await visibleNetworkIds(ctx, q as Ctx['db']);
-  const own = nets === null || nets.includes(networkId);
-  const p = ctx.access.permissions;
-  const edit = p.has('ADMIN') || (own && (p.has('CAMPAIGN_EDIT') || p.has('CAMPAIGN_EDIT_SUBORDINATES')));
-  if (own || edit) return { edit };
+  const network = (await q.query<{ owner_id: string | null }>(
+    `select a.user_id as owner_id from kam.network n left join kam.kam_assignment a
+       on a.client_id=n.client_id and a.network_id=n.id and a.valid @> current_date
+      where n.client_id=$1 and n.id=$2`, [ctx.clientId, networkId])).rows[0];
+  if (!network) throw notFound();
+  const edit = ctx.access.permissions.has('ADMIN') || canEditFor(ctx, network.owner_id);
+  if (edit) return { edit };
+  const nets = await visibleNetworkIds(ctx, q);
+  if (nets === null || nets.includes(networkId)) return { edit: false };
   // Согласующий видит контакты сети кампании, которую он согласует.
   const vis = campaignVisibility(ctx, 3);
-  const seen = (await q.query(`select 1 from kam.campaign c where c.client_id=$1 and c.network_id=$2 and ${vis.sql} limit 1`, [ctx.clientId, networkId, ...vis.params])).rowCount;
+  const seen = (await q.query(`select 1 from kam.campaign_with_owner c where c.client_id=$1 and c.network_id=$2 and ${vis.sql} limit 1`, [ctx.clientId, networkId, ...vis.params])).rowCount;
   if (!seen) throw notFound();
   return { edit: false };
 }
@@ -63,12 +66,16 @@ export async function saveContact(tx: Tx, ctx: Ctx, networkId: string | null, id
   let before: Record<string, unknown> | undefined;
   if (id) {
     if (!isUuid(id)) throw notFound();
+    net = (await tx.query<{ network_id: string }>('select network_id from kam.network_contact where client_id=$1 and id=$2', [ctx.clientId, id])).rows[0]?.network_id ?? null;
+  }
+  if (!isUuid(net)) throw notFound();
+  await tx.query('select id from kam.network where client_id=$1 and id=$2 for share', [ctx.clientId, net]);
+  const a = await networkAccess(tx, ctx, net);
+  if (!a.edit) throw forbidden('Контакты сети ведут закреплённые КАМ и их руководители.');
+  if (id) {
     before = (await tx.query('select network_id, name, position, phone, email, note, is_key, archived_at from kam.network_contact where client_id=$1 and id=$2 for update', [ctx.clientId, id])).rows[0];
     if (!before) throw notFound();
-    net = before.network_id as string;
   }
-  const a = await networkAccess(tx, ctx, net!);
-  if (!a.edit) throw forbidden('Контакты сети ведут закреплённые КАМ и их руководители.');
   if (b.archived === true) {
     if (!before) throw notFound();
     await tx.query('update kam.network_contact set archived_at=now(), updated_at=now() where client_id=$1 and id=$2', [ctx.clientId, id]);
@@ -105,6 +112,7 @@ export async function listActivities(ctx: Ctx, campaignId: string) {
 }
 
 export async function saveActivity(tx: Tx, ctx: Ctx, campaignId: string, id: string | null, b: Record<string, unknown>): Promise<CommandResult> {
+  await lockCampaignRecord(tx, ctx.clientId, campaignId);
   const c = await campaignOf(tx, ctx, campaignId);
   if (!canEditFor(ctx, c.owner_id)) throw forbidden();
   if (['CANCELLED', 'CLOSED'].includes(c.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Кампания отменена или закрыта.');
@@ -180,6 +188,7 @@ export async function listComments(ctx: Ctx, campaignId: string) {
 }
 
 export async function addComment(tx: Tx, ctx: Ctx, campaignId: string, b: Record<string, unknown>): Promise<CommandResult> {
+  await lockCampaignRecord(tx, ctx.clientId, campaignId);
   const c = await campaignOf(tx, ctx, campaignId);
   const body = str(b.body, 'body', 4000, true);
   const ids = Array.isArray(b.mention_ids) ? [...new Set(b.mention_ids)] : [];

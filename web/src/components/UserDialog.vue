@@ -47,18 +47,26 @@
                 <tr v-for="a in user.assignments" :key="a.id">
                   <td>{{ a.network_name }}</td>
                   <td>с {{ fmtDate(a.from) }}{{ a.to ? ` по ${fmtDate(a.to)}` : '' }}</td>
-                  <td class="actionCell"><button class="linkBtn" :disabled="busy" @click="endAssignment(a.id)">Открепить</button></td>
+                  <td class="actionCell"><button class="linkBtn" :disabled="busy" @click="chooseEnd(a)">Открепить</button></td>
                 </tr>
                 <tr v-if="!user.assignments.length"><td colspan="3" class="muted">Сотрудник не закреплён ни за одной сетью.</td></tr>
               </tbody>
             </table>
+          </div>
+          <div v-if="ending" class="panel" style="margin-top: 12px">
+            <label class="fieldLabel" for="release-from">Открепить сеть «{{ ending.network_name }}» с даты</label>
+            <div class="toolbar">
+              <q-input for="release-from" v-model="releaseFrom" :min="today" type="date" outlined dense hide-bottom-space class="dateIn" />
+              <button class="tdBtn" :disabled="busy" @click="ending = null">Отмена</button>
+              <button class="tdBtn primary" :disabled="busy || !releaseFrom" @click="endAssignment">Подтвердить</button>
+            </div>
+            <div class="fieldHint">С этого дня сеть можно закрепить за другим КАМом. Ему станут доступны все её кампании.</div>
           </div>
           <div class="toolbar" style="margin-top: 12px">
             <TdSelect v-model="newNetwork" :disable="busy" :options="networkOptions" placeholder="Сеть" aria-label="Сеть" style="width: 260px" />
             <q-input v-model="newFrom" :disable="busy" type="date" outlined dense hide-bottom-space class="dateIn" aria-label="С даты" />
             <button class="tdBtn accent" :disabled="busy || !newNetwork" @click="addAssignment"><Icon id="plus" :size="15" /><span>Закрепить</span></button>
           </div>
-          <div class="fieldHint">Открепление закрывает период вчерашним днём: история кампаний сохраняется.</div>
         </template>
 
         <!-- Доступ -->
@@ -101,7 +109,7 @@ const $q = useQuasar();
 const { err, busy, run } = useCommand();
 const tabs = [{ key: 'roles', label: 'Роли' }, { key: 'manager', label: 'Руководитель' }, { key: 'networks', label: 'Сети' }, { key: 'access', label: 'Доступ' }];
 const tab = ref('roles');
-const today = new Date().toISOString().slice(0, 10);
+const today = new Intl.DateTimeFormat('en-CA', { timeZone: state.ref?.time_zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
 const roleIds = ref([...props.user.role_ids]);
 const brandIds = ref([...props.user.brand_ids]);
@@ -110,6 +118,8 @@ const managerId = ref<string | null>(props.user.manager?.manager_id ?? null);
 const managerFrom = ref(today);
 const newNetwork = ref<string | null>(null);
 const newFrom = ref(today);
+const ending = ref<User['assignments'][number] | null>(null);
+const releaseFrom = ref(today);
 const tempPassword = ref('');
 
 const activeRoles = computed(() => props.roles.filter((r) => !r.archived || props.user.role_ids.includes(r.id)));
@@ -138,9 +148,15 @@ async function addAssignment() {
   const r = await run(() => api.post(`${base()}/users/${props.user.id}/assignments`, { network_id: newNetwork.value, from: newFrom.value }));
   if (r) { newNetwork.value = null; done('Сотрудник закреплён за сетью'); }
 }
-async function endAssignment(id: string) {
-  const r = await run(() => api.post(`${base()}/assignments/${id}/end`, {}));
-  if (r) done('Сотрудник откреплён');
+function chooseEnd(assignment: User['assignments'][number]) {
+  ending.value = assignment;
+  releaseFrom.value = today;
+}
+async function endAssignment() {
+  const assignment = ending.value;
+  if (!assignment) return;
+  const r = await run(() => api.post(`${base()}/assignments/${assignment.id}/end`, { from: releaseFrom.value }));
+  if (r) { ending.value = null; done('Закрепление обновлено'); }
 }
 async function resetPassword() {
   const r = await run(() => api.post<{ temporary_password: string }>(`${base()}/users/${props.user.id}/password-reset`, {}));

@@ -7,6 +7,7 @@ export interface Company { id: string; code: string; name: string; roles: string
 export interface Me { user_id: string; email: string; display_name: string; must_change_password: boolean; via: 'PASSWORD' | 'SSO'; companies: Company[] }
 export interface RefNetwork { id: string; name: string; regions: string[]; group_id: string | null; legal_entities: number }
 export interface Reference {
+  time_zone: string;
   networks: RefNetwork[]; groups: { id: string; name: string }[];
   types: { id: string; name: string; period_split: string; control_days: number }[];
   brands: { id: string; name: string }[]; owners: { id: string; name: string }[];

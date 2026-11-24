@@ -2,6 +2,7 @@
 // бренды, типы кампаний, журнал. Все команды — с журналом в той же транзакции.
 
 import { randomUUID } from 'node:crypto';
+import { todayIso as today } from './time.js';
 import type { Tx } from './db.js';
 import { ApiError, invalid, notFound, required } from './errors.js';
 import { type Ctx, PERMISSIONS, SCOPES, type Permission, type Scope, requirePermission } from './access.js';
@@ -18,10 +19,11 @@ const text = (v: unknown, field: string, max: number, opt = false): string => {
 };
 const date = (v: unknown, field: string, opt = false): string | null => {
   if ((v === undefined || v === null || v === '') && opt) return null;
-  if (typeof v !== 'string' || !DATE.test(v)) throw invalid(field, 'Укажите дату в формате ГГГГ-ММ-ДД.');
+  if (typeof v !== 'string' || !DATE.test(v) || !Number.isFinite(Date.parse(v)) || new Date(v).toISOString().slice(0, 10) !== v) {
+    throw invalid(field, 'Укажите существующую дату в формате ГГГГ-ММ-ДД.');
+  }
   return v;
 };
-const today = () => new Date().toISOString().slice(0, 10);
 
 /** Контрольное число ИНН (10 или 12 цифр) по правилам ФНС. */
 export function innValid(inn: string): boolean {
@@ -256,18 +258,25 @@ export async function addAssignment(tx: Tx, ctx: Ctx, userId: string, b: Record<
   return { status: 201, body: { id } };
 }
 
-/** Завершить закрепление вчерашним днём (история сохраняется). Будущее закрепление удаляется. */
-export async function endAssignment(tx: Tx, ctx: Ctx, assignmentId: string): Promise<CommandResult> {
+/** С указанного дня сеть свободна. По умолчанию — с сегодняшнего дня. */
+export async function endAssignment(tx: Tx, ctx: Ctx, assignmentId: string, b: Record<string, unknown>): Promise<CommandResult> {
   requirePermission(ctx, 'ADMIN');
   if (!isUuid(assignmentId)) throw notFound();
-  const { rows: [a] } = await tx.query<{ starts_today_or_later: boolean; ended: boolean }>(
-    `select lower(valid) >= current_date as starts_today_or_later, coalesce(upper(valid) <= current_date, false) as ended
+  const requested = date(b.from, 'from', true);
+  await tx.query(
+    `select n.id from kam.kam_assignment a join kam.network n on n.client_id=a.client_id and n.id=a.network_id
+      where a.client_id=$1 and a.id=$2 for update of n`, [ctx.clientId, assignmentId]);
+  const { rows: [a] } = await tx.query<{ network_id: string; user_id: string; start: string; end_exclusive: string | null; today: string }>(
+    `select network_id, user_id, lower(valid) as start, upper(valid) as end_exclusive, current_date as today
        from kam.kam_assignment where client_id=$1 and id=$2 for update`, [ctx.clientId, assignmentId]);
   if (!a) throw notFound();
-  if (a.ended) return { status: 200, body: { id: assignmentId } };
-  if (a.starts_today_or_later) await tx.query('delete from kam.kam_assignment where client_id=$1 and id=$2', [ctx.clientId, assignmentId]);
-  else await tx.query(`update kam.kam_assignment set valid = daterange(lower(valid), current_date, '[)') where client_id=$1 and id=$2`, [ctx.clientId, assignmentId]);
-  await audit(tx, ctx, { entityType: 'assignment', entityId: assignmentId, action: 'END' });
+  const from = requested ?? a.today;
+  if (from < a.today) throw invalid('from', 'Выберите сегодня или будущую дату открепления.');
+  if (a.end_exclusive && a.end_exclusive <= from) return { status: 200, body: { id: assignmentId } };
+  if (from <= a.start) await tx.query('delete from kam.kam_assignment where client_id=$1 and id=$2', [ctx.clientId, assignmentId]);
+  else await tx.query(`update kam.kam_assignment set valid = daterange(lower(valid), $3::date, '[)') where client_id=$1 and id=$2`, [ctx.clientId, assignmentId, from]);
+  await audit(tx, ctx, { entityType: 'assignment', entityId: assignmentId, action: 'END',
+    before: { network_id: a.network_id, user_id: a.user_id, from: a.start, end_exclusive: a.end_exclusive }, after: { released_from: from } });
   return { status: 200, body: { id: assignmentId } };
 }
 

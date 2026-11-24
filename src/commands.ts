@@ -77,18 +77,28 @@ export interface LockedCampaign {
   id: string;
   revision: number;
   stage: string;
-  owner_id: string;
+  owner_id: string | null;
   network_id: string;
 }
 
-/** Блокирует строку кампании и проверяет If-Match: устаревшая форма не затирает чужую правку (412). */
+/** Сериализует изменение кампании как с переходом этапа, так и с передачей сети. */
+export async function lockCampaignRecord(tx: Tx, clientId: string, id: string): Promise<LockedCampaign> {
+  if (!isUuid(id)) throw notFound();
+  const locked = await tx.query(
+    `select c.id from kam.campaign c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+      where c.client_id=$1 and c.id=$2 for share of n for update of c`, [clientId, id]);
+  if (!locked.rowCount) throw notFound();
+  // Отдельное чтение видит закрепление, которое могло смениться за время ожидания блокировки.
+  const { rows } = await tx.query<LockedCampaign>(
+    'select id, revision, stage, owner_id, network_id from kam.campaign_with_owner where client_id=$1 and id=$2', [clientId, id]);
+  return rows[0]!;
+}
+
+/** Устаревшая форма не затирает чужую правку (412). */
 export async function lockCampaign(tx: Tx, ctx: Ctx, id: string, ifMatch: string | undefined): Promise<LockedCampaign> {
   if (!isUuid(id)) throw notFound();
   if (!ifMatch) throw new ApiError(428, 'REVISION_REQUIRED', 'Передайте заголовок If-Match с ревизией кампании.');
-  const { rows } = await tx.query<LockedCampaign>(
-    'select id, revision, stage, owner_id, network_id from kam.campaign where client_id=$1 and id=$2 for update', [ctx.clientId, id]);
-  const c = rows[0];
-  if (!c) throw notFound();
+  const c = await lockCampaignRecord(tx, ctx.clientId, id);
   if (ifMatch.trim() !== campaignEtag(c.id, c.revision)) {
     throw new ApiError(412, 'STALE_REVISION', 'Кампанию уже изменили. Обновите данные и повторите.', { current_revision: c.revision });
   }

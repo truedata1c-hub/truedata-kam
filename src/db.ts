@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { APP_TZ } from './time.js';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +11,7 @@ export type Tx = pg.PoolClient;
 pg.types.setTypeParser(1082, (v) => v);
 
 export function createPool(connectionString: string): Db {
-  const pool = new pg.Pool({ connectionString, max: 10 });
+  const pool = new pg.Pool({ connectionString, max: 10, options: `-c TimeZone=${APP_TZ}` });
   // Простаивающее соединение может оборваться (перезапуск PostgreSQL, сеть). Без обработчика это роняет процесс;
   // пул сам заменит соединение, а запросы получат ошибку и повторятся по своим правилам.
   pool.on('error', (e) => { console.error('postgres: соединение пула оборвалось:', e.message); });

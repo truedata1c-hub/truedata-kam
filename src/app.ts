@@ -312,7 +312,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
   app.post(`${C}/users/:id/password-reset`, command((tx, ctx, req) => admin.resetPassword(tx, ctx, param(req, 'id'))));
   app.put(`${C}/users/:id/manager`, command((tx, ctx, req) => admin.setManager(tx, ctx, param(req, 'id'), body(req))));
   app.post(`${C}/users/:id/assignments`, command((tx, ctx, req) => admin.addAssignment(tx, ctx, param(req, 'id'), body(req))));
-  app.post(`${C}/assignments/:id/end`, command((tx, ctx, req) => admin.endAssignment(tx, ctx, param(req, 'id'))));
+  app.post(`${C}/assignments/:id/end`, command((tx, ctx, req) => admin.endAssignment(tx, ctx, param(req, 'id'), body(req))));
 
   app.get(`${C}/networks`, async (req) => admin.listNetworks(await ctxOf(req)));
   app.post(`${C}/networks`, command((tx, ctx, req) => admin.saveNetwork(tx, ctx, null, body(req))));

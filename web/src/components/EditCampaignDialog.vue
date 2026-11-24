@@ -23,10 +23,6 @@
             <label class="fieldLabel" for="ec-control">Контрольная дата<span class="req">*</span></label>
             <q-input for="ec-control" v-model="form.control_date" type="date" outlined dense aria-label="Контрольная дата" hide-bottom-space :error="err.field === 'control_date'" />
           </div>
-          <div v-if="ownerOptions.length > 1">
-            <label class="fieldLabel">Ответственный</label>
-            <TdSelect v-model="form.owner_id" :options="ownerOptions" style="width: 100%" aria-label="Ответственный" />
-          </div>
           <div class="full">
             <label class="fieldLabel">Юрлица сети (ИНН)<span class="req">*</span></label>
             <div class="checkList">
@@ -52,24 +48,18 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue';
 import { api } from '../api';
-import { base, state } from '../store';
+import { base } from '../store';
 import { useCommand } from '../command';
 import type { Campaign } from '../types';
 import Icon from './Icon.vue';
-import TdSelect from './TdSelect.vue';
 
 const props = defineProps<{ campaign: Campaign; etag: string }>();
 const emit = defineEmits<{ close: []; saved: [warnings: { message: string }[]] }>();
 const { err, busy, run } = useCommand();
 const c = props.campaign;
-const form = reactive({ title: c.title, period_from: c.period_from, period_to: c.period_to, control_date: c.control_date, owner_id: c.owner.id });
+const form = reactive({ title: c.title, period_from: c.period_from, period_to: c.period_to, control_date: c.control_date });
 const activeEntities = computed(() => c.legal_entities.filter((e) => e.active));
 const selected = ref(c.legal_entities.filter((e) => e.selected && e.active).map((e) => e.id));
-// Переназначить можно на себя или подчинённого, закреплённого за этой сетью.
-const ownerOptions = computed(() => {
-  const list = (state.ref?.assignable ?? []).filter((a) => a.network_ids.includes(c.network.id)).map((a) => ({ label: a.name, value: a.id }));
-  return list.some((o) => o.value === c.owner.id) ? list : [{ label: c.owner.name, value: c.owner.id }, ...list];
-});
 
 async function save() {
   const r = await run(() => api.patch<{ warnings: { message: string }[] }>(`${base()}/campaigns/${c.id}`, { ...form, legal_entity_ids: selected.value }, props.etag));

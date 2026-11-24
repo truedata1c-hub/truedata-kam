@@ -4,10 +4,11 @@
 import { randomUUID } from 'node:crypto';
 import type { Tx } from './db.js';
 import { ApiError, forbidden, invalid, notFound, required } from './errors.js';
-import { type Ctx, campaignVisibility, canEditFor, isAssigned } from './access.js';
+import { type Ctx, campaignVisibility, canEditFor } from './access.js';
 import { type CommandResult, audit, bumpCampaign, campaignEtag, campaignEvent, isUuid, lockCampaign } from './commands.js';
 import { closeApproval } from './approval.js';
 import { notify } from './notify.js';
+import { todayIso } from './time.js';
 
 export const STAGES = ['PREPARATION', 'NEGOTIATION', 'APPROVAL', 'APPROVED', 'CONFIRMED', 'FINAL', 'CANCELLED', 'CLOSED'] as const;
 export type Stage = (typeof STAGES)[number];
@@ -71,22 +72,22 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
             (c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL'])) overdue,
             n.id network_id, n.name network_name, n.regions network_regions,
             t.id type_id, t.name type_name,
-            u.id owner_id, u.display_name owner_name,
+            u.id owner_id, coalesce(u.display_name, 'КАМ не назначен') owner_name,
             (select count(*)::int from kam.campaign_legal_entity e where e.client_id = c.client_id and e.campaign_id = c.id) legal_entities,
             v.number version, v.total_investment::float8 investment, v.total_turnover::float8 turnover
-       from kam.campaign c
+       from kam.campaign_with_owner c
        left join lateral (select number, total_investment, total_turnover from kam.offer_version ov
                            where ov.client_id = c.client_id and ov.campaign_id = c.id order by number desc limit 1) v on true
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
        join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
-       join kam.app_user u on u.id = c.owner_id
+       left join kam.app_user u on u.id = c.owner_id
       where ${where.join(' and ')}
       order by (c.stage = any(array['CANCELLED','CLOSED'])), c.control_date, n.name
       limit 1000`, params);
   const { rows: stageRows } = await ctx.db.query<{ stage: Stage; n: number; overdue: number }>(
     `select c.stage, count(*)::int n,
             count(*) filter (where c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL']))::int overdue
-       from kam.campaign c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+       from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
       where ${baseWhere} group by c.stage`, stageParams);
   const byStage = Object.fromEntries(STAGES.map((s) => [s, 0])) as Record<Stage, number>;
   let overdue = 0;
@@ -114,18 +115,18 @@ async function loadVisible(ctx: Ctx, id: string, q: Pick<Tx, 'query'> = ctx.db) 
   const vis = campaignVisibility(ctx, 3);
   const { rows } = await q.query(
     `select c.*, n.name network_name, n.regions network_regions, t.name type_name, t.period_split, t.control_days,
-            u.display_name owner_name, u.email owner_email, cb.display_name created_by_name
-       from kam.campaign c
+            coalesce(u.display_name, 'КАМ не назначен') owner_name, u.email owner_email, cb.display_name created_by_name
+       from kam.campaign_with_owner c
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
        join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
-       join kam.app_user u on u.id = c.owner_id
+       left join kam.app_user u on u.id = c.owner_id
        join kam.app_user cb on cb.id = c.created_by
       where c.client_id = $1 and c.id = $2 and ${vis.sql}`, [ctx.clientId, id, ...vis.params]);
   if (!rows[0]) throw notFound();
-  return rows[0] as Record<string, any> & { id: string; stage: Stage; owner_id: string; network_id: string; revision: number };
+  return rows[0] as Record<string, any> & { id: string; stage: Stage; owner_id: string | null; network_id: string; revision: number };
 }
 
-function actionsFor(ctx: Ctx, c: { stage: Stage; owner_id: string }) {
+function actionsFor(ctx: Ctx, c: { stage: Stage; owner_id: string | null }) {
   const edit = canEditFor(ctx, c.owner_id);
   const a: string[] = [];
   if (edit && EDITABLE_STAGES.includes(c.stage)) a.push('EDIT');
@@ -157,7 +158,7 @@ export async function getCampaign(ctx: Ctx, id: string) {
     `select e.id, e.kind, e.from_stage, e.to_stage, e.comment, e.payload, e.at, u.display_name actor_name
        from kam.campaign_event e left join kam.app_user u on u.id = e.actor
       where e.client_id = $1 and e.campaign_id = $2 order by e.at desc, e.id`, [ctx.clientId, c.id]);
-  const overdue = c.control_date < new Date().toISOString().slice(0, 10) && OPEN_STAGES.includes(c.stage);
+  const overdue = c.control_date < todayIso() && OPEN_STAGES.includes(c.stage);
   return {
     data: {
       id: c.id, number: c.number, title: c.title, stage: c.stage, stage_changed_at: c.stage_changed_at, cancel_reason: c.cancel_reason,
@@ -176,13 +177,10 @@ export async function getCampaign(ctx: Ctx, id: string) {
 
 // Проверки реквизитов -------------------------------------------------------
 
-async function checkOwner(tx: Tx, ctx: Ctx, ownerId: string, networkId: string) {
-  if (!isUuid(ownerId)) throw invalid('owner_id', 'Укажите ответственного.');
-  if (!canEditFor(ctx, ownerId)) {
-    throw ownerId === ctx.principal.userId ? forbidden('В вашей роли нельзя вести кампании.') : invalid('owner_id', 'Назначить можно только себя или подчинённого.', 'OWNER_NOT_ALLOWED');
-  }
-  if (!(await isAssigned(tx, ctx.clientId, ownerId, networkId))) {
-    throw invalid('owner_id', 'Ответственный не закреплён за этой сетью. Закрепление настраивает администратор.', 'NETWORK_NOT_ASSIGNED');
+/** Старые формы передают owner_id. Сверяем его с сетью, чтобы не принять устаревшее назначение. */
+function checkSubmittedOwner(value: unknown, current: string | null) {
+  if (value !== undefined && value !== current) {
+    throw invalid('owner_id', 'Ответственного определяет закрепление аптечной сети. Обновите карточку.', 'OWNER_FROM_NETWORK');
   }
 }
 
@@ -217,7 +215,7 @@ export async function createCampaign(tx: Tx, ctx: Ctx, b: Record<string, unknown
   if (!ctx.access.permissions.has('CAMPAIGN_EDIT') && !ctx.access.permissions.has('CAMPAIGN_EDIT_SUBORDINATES')) throw forbidden('В вашей роли нельзя создавать кампании.');
   if (!isUuid(b.network_id)) throw required('network_id', 'Выберите аптечную сеть.');
   if (!isUuid(b.type_id)) throw required('type_id', 'Выберите тип кампании.');
-  const net = (await tx.query<{ archived: boolean }>('select archived from kam.network where client_id=$1 and id=$2', [ctx.clientId, b.network_id])).rows[0];
+  const net = (await tx.query<{ archived: boolean }>('select archived from kam.network where client_id=$1 and id=$2 for share', [ctx.clientId, b.network_id])).rows[0];
   if (!net || net.archived) throw invalid('network_id', 'Сеть не найдена.');
   const type = (await tx.query<{ control_days: number; archived: boolean }>('select control_days, archived from kam.campaign_type where client_id=$1 and id=$2', [ctx.clientId, b.type_id])).rows[0];
   if (!type || type.archived) throw invalid('type_id', 'Тип кампании не найден.');
@@ -227,8 +225,16 @@ export async function createCampaign(tx: Tx, ctx: Ctx, b: Record<string, unknown
   if (to < from) throw invalid('period_to', 'Окончание периода раньше начала.');
   const control = dateField(b.control_date, 'control_date', true) ?? addDays(from, -type.control_days);
   if (control > to) throw invalid('control_date', 'Контрольная дата позже окончания периода.');
-  const ownerId = (b.owner_id ?? ctx.principal.userId) as string;
-  await checkOwner(tx, ctx, ownerId, b.network_id);
+  const ownerId = (await tx.query<{ user_id: string }>(
+    'select user_id from kam.kam_assignment where client_id=$1 and network_id=$2 and valid @> current_date',
+    [ctx.clientId, b.network_id])).rows[0]?.user_id;
+  if (!ownerId || !canEditFor(ctx, ownerId)) {
+    if (ownerId && ctx.access.permissions.has('CAMPAIGN_EDIT_SUBORDINATES')) {
+      throw invalid('network_id', 'Эта сеть находится вне вашей зоны ответственности.', 'OWNER_NOT_ALLOWED');
+    }
+    throw invalid('network_id', 'Выберите сеть, закреплённую за вами или вашим подчинённым.', 'NETWORK_NOT_ASSIGNED');
+  }
+  checkSubmittedOwner(b.owner_id, ownerId);
   const entities = await checkEntities(tx, ctx, b.network_id, b.legal_entity_ids);
   const id = randomUUID();
   const warnings = await overlaps(tx, ctx, { id: null, network_id: b.network_id, type_id: b.type_id, period_from: from, period_to: to });
@@ -252,20 +258,19 @@ export async function updateCampaign(tx: Tx, ctx: Ctx, id: string, ifMatch: stri
   const locked = await lockCampaign(tx, ctx, id, ifMatch);
   const before = await loadVisible(ctx, id, tx);
   if (!canEditFor(ctx, before.owner_id)) throw forbidden();
+  checkSubmittedOwner(b.owner_id, before.owner_id);
   if (!EDITABLE_STAGES.includes(before.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Реквизиты меняются только на этапах подготовки и переговоров.');
   const next = {
     title: b.title === undefined ? before.title : textField(b.title, 'title', 200),
     period_from: b.period_from === undefined ? before.period_from : dateField(b.period_from, 'period_from')!,
     period_to: b.period_to === undefined ? before.period_to : dateField(b.period_to, 'period_to')!,
     control_date: b.control_date === undefined ? before.control_date : dateField(b.control_date, 'control_date')!,
-    owner_id: (b.owner_id === undefined ? before.owner_id : b.owner_id) as string,
   };
   if (next.period_to < next.period_from) throw invalid('period_to', 'Окончание периода раньше начала.');
   if (next.control_date > next.period_to) throw invalid('control_date', 'Контрольная дата позже окончания периода.');
-  if (next.owner_id !== before.owner_id) await checkOwner(tx, ctx, next.owner_id, locked.network_id);
   await tx.query(
-    'update kam.campaign set title=$3, period_from=$4, period_to=$5, control_date=$6, owner_id=$7 where client_id=$1 and id=$2',
-    [ctx.clientId, id, next.title, next.period_from, next.period_to, next.control_date, next.owner_id]);
+    'update kam.campaign set title=$3, period_from=$4, period_to=$5, control_date=$6 where client_id=$1 and id=$2',
+    [ctx.clientId, id, next.title, next.period_from, next.period_to, next.control_date]);
   let entities: string[] | undefined;
   if (b.legal_entity_ids !== undefined) {
     entities = await checkEntities(tx, ctx, locked.network_id, b.legal_entity_ids);
@@ -277,11 +282,10 @@ export async function updateCampaign(tx: Tx, ctx: Ctx, id: string, ifMatch: stri
   if (next.title !== before.title) changes.push('название');
   if (next.period_from !== before.period_from || next.period_to !== before.period_to) changes.push('период');
   if (next.control_date !== before.control_date) changes.push('контрольная дата');
-  if (next.owner_id !== before.owner_id) changes.push('ответственный');
   if (entities) changes.push('юрлица');
   if (changes.length) await campaignEvent(tx, ctx, id, 'UPDATED', { payload: { changes } });
   await audit(tx, ctx, { entityType: 'campaign', entityId: id, action: 'UPDATE',
-    before: { title: before.title, period_from: before.period_from, period_to: before.period_to, control_date: before.control_date, owner_id: before.owner_id },
+    before: { title: before.title, period_from: before.period_from, period_to: before.period_to, control_date: before.control_date },
     after: { ...next, ...(entities ? { legal_entity_ids: entities } : {}) } });
   const warnings = await overlaps(tx, ctx, { id, network_id: locked.network_id, type_id: before.type_id, period_from: next.period_from, period_to: next.period_to });
   return { status: 200, body: { id, revision: rev, warnings }, etag: campaignEtag(id, rev) };

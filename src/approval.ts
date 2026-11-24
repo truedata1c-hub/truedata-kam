@@ -5,7 +5,7 @@ import type { Tx } from './db.js';
 import { ApiError, forbidden, invalid, notFound, required } from './errors.js';
 import { type Ctx, campaignVisibility, canEditFor, requirePermission } from './access.js';
 import { type CommandResult, audit, bumpCampaign, campaignEtag, campaignEvent, isUuid, lockCampaign } from './commands.js';
-import { computeRoute, fmtMoney } from './routes.js';
+import { canSee, computeRoute, directory, fmtMoney } from './routes.js';
 import { notify } from './notify.js';
 
 type Q = Pick<Tx, 'query'>;
@@ -27,8 +27,8 @@ const today = async (q: Q) => (await q.query<{ d: string }>('select current_date
 async function visibleCampaign(q: Q, ctx: Ctx, id: string) {
   if (!isUuid(id)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
-  const c = (await q.query<{ id: string; stage: string; owner_id: string; revision: number }>(
-    `select c.id, c.stage, c.owner_id, c.revision from kam.campaign c where c.client_id=$1 and c.id=$2 and ${vis.sql}`,
+  const c = (await q.query<{ id: string; stage: string; owner_id: string | null; revision: number }>(
+    `select c.id, c.stage, c.owner_id, c.revision from kam.campaign_with_owner c where c.client_id=$1 and c.id=$2 and ${vis.sql}`,
     [ctx.clientId, id, ...vis.params])).rows[0];
   if (!c) throw notFound();
   return c;
@@ -67,8 +67,8 @@ export async function closeApproval(tx: Tx, clientId: string, campaignId: string
 // Уведомления ----------------------------------------------------------------------
 
 async function campaignLabel(q: Q, clientId: string, id: string) {
-  const r = (await q.query<{ title: string; network: string; owner_id: string }>(
-    'select c.title, n.name network, c.owner_id from kam.campaign c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2', [clientId, id])).rows[0]!;
+  const r = (await q.query<{ title: string; network: string; owner_id: string | null }>(
+    'select c.title, n.name network, c.owner_id from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2', [clientId, id])).rows[0]!;
   return { ...r, label: `${r.network} — ${r.title}` };
 }
 
@@ -167,11 +167,12 @@ export async function withdraw(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: st
 // Решения ----------------------------------------------------------------------
 
 /** За кого пользователь может решить шаг: сам или как заместитель кандидата на сегодня. */
-async function decisionRight(q: Q, ctx: Ctx, candidates: string[]): Promise<{ ok: boolean; forUser: string | null }> {
-  if (candidates.includes(ctx.principal.userId)) return { ok: true, forUser: null };
+async function decisionRight(q: Q, ctx: Ctx, candidates: string[], owner: string | null): Promise<{ ok: boolean; forUser: string | null }> {
+  const eligible = candidates.filter((id) => id !== owner);
+  if (eligible.includes(ctx.principal.userId)) return { ok: true, forUser: null };
   const { rows } = await q.query<{ user_id: string }>(
     `select user_id from kam.substitution where client_id=$1 and deputy_id=$2 and valid @> current_date and user_id = any($3::uuid[]) order by user_id limit 1`,
-    [ctx.clientId, ctx.principal.userId, candidates]);
+    [ctx.clientId, ctx.principal.userId, eligible]);
   return rows[0] ? { ok: true, forUser: rows[0].user_id } : { ok: false, forUser: null };
 }
 
@@ -189,37 +190,42 @@ export async function decide(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
     "select id, position, title, candidates from kam.approval_step where client_id=$1 and approval_id=$2 and status='ACTIVE' for update", [ctx.clientId, a.id])).rows[0];
   if (!step || (b.step_id !== undefined && b.step_id !== step.id)) throw new ApiError(409, 'STEP_NOT_ACTIVE', 'Этот шаг уже решён. Обновите карточку.');
   if (ctx.principal.userId === a.submitted_by || ctx.principal.userId === locked.owner_id) throw new ApiError(403, 'SELF_APPROVAL', 'Нельзя согласовывать собственную кампанию.');
-  const right = await decisionRight(tx, ctx, step.candidates);
+  const right = await decisionRight(tx, ctx, step.candidates, locked.owner_id);
   if (!right.ok) throw forbidden('Вы не исполнитель этого шага и не замещаете его исполнителя.');
   await tx.query(
     `update kam.approval_step set status=$3, decided_by=$4, decided_for=$5, decision_comment=$6, decided_at=now() where client_id=$1 and id=$2`,
     [ctx.clientId, step.id, decision === 'APPROVE' ? 'APPROVED' : 'REJECTED', ctx.principal.userId, right.forUser, comment || null]);
   const forName = right.forUser ? (await tx.query<{ n: string }>('select display_name n from kam.app_user where id=$1', [right.forUser])).rows[0]?.n ?? null : null;
   await campaignEvent(tx, ctx, campaignId, 'APPROVAL_DECISION', { comment: comment || null, payload: { round: a.round, step: step.position, title: step.title, decision, for_user: right.forUser, for_user_name: forName } });
+  const c = await campaignLabel(tx, ctx.clientId, campaignId);
+  const recipients = [c.owner_id];
+  if (a.submitted_by !== c.owner_id) {
+    const d = await directory(tx, ctx.clientId);
+    const sender = d.users.get(a.submitted_by);
+    if (sender && canSee(sender, c, d)) recipients.push(sender.id);
+  }
   let stage = 'APPROVAL';
   if (decision === 'REJECT') {
     await tx.query("update kam.approval set status='REJECTED', finished_at=now() where client_id=$1 and id=$2", [ctx.clientId, a.id]);
     await tx.query("update kam.approval_step set status='CANCELLED' where client_id=$1 and approval_id=$2 and status='WAITING'", [ctx.clientId, a.id]);
     stage = 'NEGOTIATION';
     await setStage(tx, ctx, campaignId, 'APPROVAL', stage, `Отклонено на шаге «${step.title}»: ${comment}`);
-    const c = await campaignLabel(tx, ctx.clientId, campaignId);
-    await notify(tx, ctx.clientId, { kind: 'RETURNED', users: [c.owner_id, a.submitted_by], campaignId, actorId: ctx.principal.userId,
+    await notify(tx, ctx.clientId, { kind: 'RETURNED', users: recipients, campaignId, actorId: ctx.principal.userId,
       title: `Возвращено на доработку: ${c.label}`, body: `${ctx.principal.displayName}, шаг «${step.title}»: ${comment}` });
   } else {
     const next = (await tx.query<{ id: string; deadline_days: number; title: string; candidates: string[] }>(
       "select id, deadline_days, title, candidates from kam.approval_step where client_id=$1 and approval_id=$2 and status='WAITING' order by position limit 1", [ctx.clientId, a.id])).rows[0];
-    const c = await campaignLabel(tx, ctx.clientId, campaignId);
     if (next) {
       const due = addWorkdays(await today(tx), next.deadline_days);
       await tx.query("update kam.approval_step set status='ACTIVE', activated_at=now(), due_date=$3 where client_id=$1 and id=$2", [ctx.clientId, next.id, due]);
       await notifyStep(tx, ctx, campaignId, { title: next.title, candidates: next.candidates, due });
-      await notify(tx, ctx.clientId, { kind: 'DECISION', users: [c.owner_id, a.submitted_by], campaignId, actorId: ctx.principal.userId,
+      await notify(tx, ctx.clientId, { kind: 'DECISION', users: recipients, campaignId, actorId: ctx.principal.userId,
         title: `Шаг «${step.title}» согласован: ${c.label}`, body: `${ctx.principal.displayName}${forName ? ` за ${forName}` : ''}${comment ? `: ${comment}` : ''}. Следующий шаг — «${next.title}».` });
     } else {
       await tx.query("update kam.approval set status='APPROVED', finished_at=now() where client_id=$1 and id=$2", [ctx.clientId, a.id]);
       stage = 'APPROVED';
       await setStage(tx, ctx, campaignId, 'APPROVAL', stage, 'Все шаги маршрута согласованы.');
-      await notify(tx, ctx.clientId, { kind: 'APPROVED', users: [c.owner_id, a.submitted_by], campaignId, actorId: ctx.principal.userId,
+      await notify(tx, ctx.clientId, { kind: 'APPROVED', users: recipients, campaignId, actorId: ctx.principal.userId,
         title: `Согласовано внутри: ${c.label}`, body: 'Все шаги маршрута пройдены. Следующий этап — подтверждение сетью.' });
     }
   }
@@ -276,7 +282,7 @@ export async function getApproval(ctx: Ctx, campaignId: string) {
   if (current && ctx.principal.userId !== current.submitted_by && ctx.principal.userId !== c.owner_id) {
     const active = steps.find((s) => s.approval_id === current.id && s.status === 'ACTIVE');
     if (active) {
-      const right = await decisionRight(ctx.db, ctx, active.candidates);
+      const right = await decisionRight(ctx.db, ctx, active.candidates, c.owner_id);
       if (right.ok) {
         const name = right.forUser ? (await ctx.db.query<{ n: string }>('select display_name n from kam.app_user where id=$1', [right.forUser])).rows[0]?.n ?? null : null;
         my = { step_id: active.id, for_user: name };
@@ -309,30 +315,31 @@ export async function getApproval(ctx: Ctx, campaignId: string) {
   return { rounds: byRound, current, my_decision: my, can_withdraw: canWithdraw, preview };
 }
 
+const pendingForUser = `s.status = 'ACTIVE' and a.submitted_by <> $2 and c.owner_id is distinct from $2
+  and (s.candidates @> array[$2::uuid] or exists (select 1 from kam.substitution sb
+       where sb.client_id = s.client_id and sb.deputy_id = $2 and sb.valid @> current_date
+         and sb.user_id is distinct from c.owner_id and sb.user_id = any(s.candidates)))`;
+
 export async function myDecisions(ctx: Ctx, status: string | undefined) {
   const done = status === 'done';
   const params: unknown[] = [ctx.clientId, ctx.principal.userId];
-  const who = done
-    ? 's.decided_by = $2'
-    : `s.status = 'ACTIVE' and (s.candidates @> array[$2::uuid] or exists (select 1 from kam.substitution sb where sb.client_id = s.client_id and sb.deputy_id = $2
-         and sb.valid @> current_date and sb.user_id = any(s.candidates)))
-       and a.submitted_by <> $2 and c.owner_id <> $2`;
+  const who = done ? 's.decided_by = $2' : pendingForUser;
   const { rows } = await ctx.db.query(
     `select s.id step_id, s.title step_title, s.position, s.status, s.activated_at, s.due_date::text due_date, s.decided_at, s.decision_comment,
             (s.status = 'ACTIVE' and s.due_date < current_date) overdue,
             (select count(*)::int from kam.approval_step x where x.client_id = s.client_id and x.approval_id = s.approval_id and x.status <> 'SKIPPED') steps_total,
-            c.id campaign_id, c.number, c.title, c.period_from, c.period_to, c.stage, n.name network, t.name type_name, ow.display_name owner,
+            c.id campaign_id, c.number, c.title, c.period_from, c.period_to, c.stage, n.name network, t.name type_name, coalesce(ow.display_name, 'КАМ не назначен') owner,
             a.round, a.total_investment::float8 investment, a.total_turnover::float8 turnover, v.number version, sub.display_name submitted_by,
             df.display_name decided_for,
             (case when not (s.candidates @> array[$2::uuid]) then (select string_agg(u.display_name, ', ') from kam.substitution sb join kam.app_user u on u.id = sb.user_id
-               where sb.client_id = s.client_id and sb.deputy_id = $2 and sb.valid @> current_date and sb.user_id = any(s.candidates)) end) on_behalf_of
+               where sb.client_id = s.client_id and sb.deputy_id = $2 and sb.valid @> current_date and sb.user_id is distinct from c.owner_id and sb.user_id = any(s.candidates)) end) on_behalf_of
        from kam.approval_step s
        join kam.approval a on a.client_id = s.client_id and a.id = s.approval_id
        join kam.offer_version v on v.client_id = a.client_id and v.id = a.version_id
-       join kam.campaign c on c.client_id = s.client_id and c.id = s.campaign_id
+       join kam.campaign_with_owner c on c.client_id = s.client_id and c.id = s.campaign_id
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
        join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
-       join kam.app_user ow on ow.id = c.owner_id
+       left join kam.app_user ow on ow.id = c.owner_id
        join kam.app_user sub on sub.id = a.submitted_by
        left join kam.app_user df on df.id = s.decided_for
       where s.client_id = $1 and ${who}
@@ -346,10 +353,8 @@ export async function myDecisions(ctx: Ctx, status: string | undefined) {
 export async function pendingCount(ctx: Ctx): Promise<number> {
   const { rows } = await ctx.db.query<{ n: number }>(
     `select count(*)::int n from kam.approval_step s join kam.approval a on a.client_id = s.client_id and a.id = s.approval_id
-       join kam.campaign c on c.client_id = s.client_id and c.id = s.campaign_id
-      where s.client_id=$1 and s.status='ACTIVE' and a.submitted_by <> $2 and c.owner_id <> $2
-        and (s.candidates @> array[$2::uuid] or exists (select 1 from kam.substitution sb where sb.client_id = s.client_id and sb.deputy_id = $2
-             and sb.valid @> current_date and sb.user_id = any(s.candidates)))`, [ctx.clientId, ctx.principal.userId]);
+       join kam.campaign_with_owner c on c.client_id = s.client_id and c.id = s.campaign_id
+      where s.client_id=$1 and ${pendingForUser}`, [ctx.clientId, ctx.principal.userId]);
   return rows[0]!.n;
 }
 
