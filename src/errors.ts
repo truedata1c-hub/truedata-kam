@@ -22,7 +22,7 @@ export function fromPg(e: unknown): ApiError | null {
   const err = e as { code?: string; constraint?: string; table?: string };
   if (err?.code === '23P01') {
     if (err.table === 'user_manager') return new ApiError(422, 'PERIOD_OVERLAP', 'У сотрудника уже есть руководитель на эти даты.');
-    if (err.table === 'kam_assignment') return new ApiError(422, 'PERIOD_OVERLAP', 'Сотрудник уже закреплён за этой сетью на эти даты.');
+    if (err.table === 'kam_assignment') return new ApiError(422, 'PERIOD_OVERLAP', 'У сети уже есть закрепление на эти даты. Обновите список сотрудников.', {}, 'network_id');
     return new ApiError(422, 'PERIOD_OVERLAP', 'Периоды действия пересекаются.', { table: err.table });
   }
   if (err?.code === '23505') {

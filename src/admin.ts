@@ -230,11 +230,25 @@ export async function addAssignment(tx: Tx, ctx: Ctx, userId: string, b: Record<
   requirePermission(ctx, 'ADMIN');
   await lockMember(tx, ctx, userId);
   if (!isUuid(b.network_id)) throw required('network_id', 'Выберите сеть.');
-  const net = (await tx.query('select 1 from kam.network where client_id=$1 and id=$2 and not archived', [ctx.clientId, b.network_id])).rowCount;
-  if (!net) throw invalid('network_id', 'Сеть не найдена.');
   const from = date(b.from, 'from', true) ?? today();
   const to = date(b.to, 'to', true);
   if (to && to < from) throw invalid('to', 'Окончание раньше начала.');
+  // Два администратора могут назначать одну сеть одновременно. Второй увидит имя первого назначенного КАМа.
+  const { rows: [network] } = await tx.query<{ name: string }>(
+    'select name from kam.network where client_id=$1 and id=$2 and not archived for update', [ctx.clientId, b.network_id]);
+  if (!network) throw invalid('network_id', 'Сеть не найдена.');
+  const { rows: [holder] } = await tx.query<{ user_id: string; display_name: string; ended: boolean }>(
+    `select a.user_id, u.display_name, coalesce(upper(a.valid) <= current_date, false) as ended
+       from kam.kam_assignment a join kam.app_user u on u.id = a.user_id
+      where a.client_id=$1 and a.network_id=$2 and a.valid && daterange($3::date, $4::date, '[]')
+      order by lower(a.valid) limit 1`, [ctx.clientId, b.network_id, from, to]);
+  if (holder) {
+    if (holder.user_id === userId) throw invalid('network_id', 'Сотрудник уже закреплён за этой сетью на эти даты.', 'PERIOD_OVERLAP');
+    const next = holder.ended ? 'Выберите даты после окончания этого закрепления.' : 'Сначала открепите сеть в карточке этого сотрудника.';
+    throw new ApiError(409, 'NETWORK_ALREADY_ASSIGNED',
+      `На выбранные даты сеть «${network.name}» уже закреплена. Ответственный КАМ — ${holder.display_name}. ${next}`,
+      { user_id: holder.user_id, display_name: holder.display_name }, 'network_id');
+  }
   const id = randomUUID();
   await tx.query(`insert into kam.kam_assignment(client_id, id, user_id, network_id, valid) values ($1,$2,$3,$4, daterange($5::date, $6::date, '[]'))`,
     [ctx.clientId, id, userId, b.network_id, from, to]);
@@ -246,9 +260,12 @@ export async function addAssignment(tx: Tx, ctx: Ctx, userId: string, b: Record<
 export async function endAssignment(tx: Tx, ctx: Ctx, assignmentId: string): Promise<CommandResult> {
   requirePermission(ctx, 'ADMIN');
   if (!isUuid(assignmentId)) throw notFound();
-  const a = (await tx.query<{ from: string }>('select lower(valid)::text "from" from kam.kam_assignment where client_id=$1 and id=$2 for update', [ctx.clientId, assignmentId])).rows[0];
+  const { rows: [a] } = await tx.query<{ starts_today_or_later: boolean; ended: boolean }>(
+    `select lower(valid) >= current_date as starts_today_or_later, coalesce(upper(valid) <= current_date, false) as ended
+       from kam.kam_assignment where client_id=$1 and id=$2 for update`, [ctx.clientId, assignmentId]);
   if (!a) throw notFound();
-  if (a.from >= today()) await tx.query('delete from kam.kam_assignment where client_id=$1 and id=$2', [ctx.clientId, assignmentId]);
+  if (a.ended) return { status: 200, body: { id: assignmentId } };
+  if (a.starts_today_or_later) await tx.query('delete from kam.kam_assignment where client_id=$1 and id=$2', [ctx.clientId, assignmentId]);
   else await tx.query(`update kam.kam_assignment set valid = daterange(lower(valid), current_date, '[)') where client_id=$1 and id=$2`, [ctx.clientId, assignmentId]);
   await audit(tx, ctx, { entityType: 'assignment', entityId: assignmentId, action: 'END' });
   return { status: 200, body: { id: assignmentId } };

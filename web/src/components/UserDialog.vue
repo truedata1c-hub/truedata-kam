@@ -54,8 +54,8 @@
             </table>
           </div>
           <div class="toolbar" style="margin-top: 12px">
-            <TdSelect v-model="newNetwork" :options="networkOptions" placeholder="Сеть" aria-label="Сеть" style="width: 260px" />
-            <q-input v-model="newFrom" type="date" outlined dense hide-bottom-space class="dateIn" aria-label="С даты" />
+            <TdSelect v-model="newNetwork" :disable="busy" :options="networkOptions" placeholder="Сеть" aria-label="Сеть" style="width: 260px" />
+            <q-input v-model="newFrom" :disable="busy" type="date" outlined dense hide-bottom-space class="dateIn" aria-label="С даты" />
             <button class="tdBtn accent" :disabled="busy || !newNetwork" @click="addAssignment"><Icon id="plus" :size="15" /><span>Закрепить</span></button>
           </div>
           <div class="fieldHint">Открепление закрывает период вчерашним днём: история кампаний сохраняется.</div>
@@ -73,7 +73,7 @@
             <div class="fieldHint">Временный пароль нужен только для входа напрямую в модуль; при входе из платформы пароль не используется.</div>
           </div>
         </template>
-        <div v-if="err.message" class="formError" role="alert">{{ err.message }}</div>
+        <div v-if="err.message" :class="err.code === 'NETWORK_ALREADY_ASSIGNED' ? 'banner warn' : 'formError'" role="alert">{{ err.message }}</div>
       </div>
       <div class="dlgFoot">
         <button v-close-popup class="tdBtn">Закрыть</button>
@@ -85,7 +85,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue';
+import { computed, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 import { api } from '../api';
 import { base, state } from '../store';
@@ -116,8 +116,12 @@ const activeRoles = computed(() => props.roles.filter((r) => !r.archived || prop
 const needsBrands = computed(() => props.roles.some((r) => roleIds.value.includes(r.id) && r.scope === 'BRANDS'));
 const managerOptions = computed(() => props.users.filter((u) => u.id !== props.user.id && u.active).map((u) => ({ label: u.display_name, value: u.id })));
 const networkOptions = computed(() => {
-  const taken = new Set(props.user.assignments.map((a) => a.network_id));
+  const taken = new Set(props.user.assignments.filter((a) => !a.to || a.to >= (newFrom.value || today)).map((a) => a.network_id));
   return (state.ref?.networks ?? []).filter((n) => !taken.has(n.id)).map((n) => ({ label: n.name, value: n.id }));
+});
+
+watch([newNetwork, newFrom, tab], () => {
+  if (err.field === 'network_id') err.message = '';
 });
 
 const done = (msg: string) => { $q.notify({ type: 'positive', message: msg }); emit('changed'); };
