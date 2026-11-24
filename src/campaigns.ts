@@ -13,6 +13,7 @@ import { todayIso } from './time.js';
 export const STAGES = ['PREPARATION', 'NEGOTIATION', 'APPROVAL', 'APPROVED', 'CONFIRMED', 'FINAL', 'CANCELLED', 'CLOSED'] as const;
 export type Stage = (typeof STAGES)[number];
 export const OPEN_STAGES: Stage[] = ['PREPARATION', 'NEGOTIATION', 'APPROVAL'];
+const AGREED_STAGES: Stage[] = ['APPROVED', 'CONFIRMED', 'FINAL'];
 const EDITABLE_STAGES: Stage[] = ['PREPARATION', 'NEGOTIATION'];
 const CANCELLABLE: Stage[] = ['PREPARATION', 'NEGOTIATION', 'APPROVAL', 'APPROVED', 'CONFIRMED'];
 
@@ -61,12 +62,13 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
     const num = push(term.replace(/^К-?/i, ''));
     where.push(`(c.title ilike ${like} or n.name ilike ${like} or c.number::text = ${num})`);
   }
-  if (q.overdue === '1') where.push(`c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL'])`);
-  // Количество по этапам — по выборке без фильтра этапа, чтобы фильтр показывал, что в каждом этапе.
+  // Счётчики кнопок относятся к одному портфелю до выбора этапа или просрочки.
   const baseWhere = where.join(' and ');
   const stageParams = [...params];
+  if (q.overdue === '1') where.push(`c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL'])`);
   if (q.stage && (STAGES as readonly string[]).includes(q.stage)) where.push(`c.stage = ${push(q.stage)}`);
   else if (q.stage === 'ACTIVE') where.push(`c.stage <> all(array['CANCELLED','CLOSED'])`);
+  else if (q.stage === 'AGREED') where.push(`c.stage = any(${push(AGREED_STAGES)}::text[])`);
   const { rows } = await ctx.db.query(
     `select c.id, c.number, c.title, c.stage, c.stage_changed_at, c.period_from, c.period_to, c.control_date, c.updated_at,
             (c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL'])) overdue,
@@ -102,7 +104,7 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
     kpi: {
       active, overdue, investment, turnover, roi: investment > 0 ? Math.round((turnover / investment) * 100) / 100 : null, with_versions: counted.length,
       awaiting_decision: byStage.APPROVAL,
-      approved: byStage.APPROVED + byStage.CONFIRMED + byStage.FINAL,
+      approved: AGREED_STAGES.reduce((sum, stage) => sum + byStage[stage], 0),
       by_stage: byStage,
     },
   };

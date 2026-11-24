@@ -5,11 +5,18 @@
 
 /* KPI — как плашки портала: подпись 10.5 px, значение 18 px / 700, белая карточка с тонкой рамкой. */
 .kpiGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+.kpiGrid > * { display: grid; align-content: start; align-items: start; }
+/* В каждом ряду карточки делят три строки: заголовок, значение, пояснение. */
+@supports (grid-template-rows: subgrid) {
+  .kpiGrid > * { grid-row: span 3; grid-template-rows: subgrid; row-gap: 0; }
+}
 .kpi { border: 1px solid var(--line); border-radius: 9px; background: #fff; padding: 12px 14px; text-align: left; font: inherit; color: inherit; }
 button.kpi { cursor: pointer; }
 button.kpi:hover { background: var(--hover); }
-.kpi.selected { border-color: var(--purple-line); background: var(--purple-soft); }
-.kpiLabel { font-size: 10.5px; line-height: 15px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+button.kpi[aria-pressed="true"] { border-color: var(--purple-line); background: var(--purple-soft); }
+button.kpi:focus-visible { outline: 2px solid var(--purple); outline-offset: 2px; }
+.kpiLabel { font-size: 10.5px; line-height: 15px; color: var(--muted); display: flex; align-items: flex-start; gap: 6px; }
+.kpiLabel > .tdIcon { margin-top: 1px; }
 .kpiValue { font-size: 18px; line-height: 26px; font-weight: 700; color: var(--ink); margin-top: 4px; }
 .kpiValue.red { color: var(--red); }
 .kpiSub { font-size: 11px; line-height: 15px; color: var(--muted); margin-top: 2px; }

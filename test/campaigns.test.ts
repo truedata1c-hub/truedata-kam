@@ -144,8 +144,15 @@ test('портфель: фильтры, просрочка, количество
   const filtered = (await call(`${C(env)}/campaigns`, { as: 'igor.vasiliev', query: { year: '2027', stage: 'APPROVAL' } })).json;
   assert.equal(filtered.items.length, stages.APPROVAL);
   assert.equal(filtered.kpi.by_stage.NEGOTIATION, stages.NEGOTIATION, 'счётчики этапов не зависят от фильтра этапа');
-  const overdue = (await call(`${C(env)}/campaigns`, { as: 'igor.vasiliev', query: { overdue: '1' } })).json;
+  const agreed = (await call(`${C(env)}/campaigns`, { as: 'igor.vasiliev', query: { year: '2027', stage: 'AGREED' } })).json;
+  const agreedIds = r.items.filter((c: any) => ['APPROVED', 'CONFIRMED', 'FINAL'].includes(c.stage)).map((c: any) => c.id).sort();
+  assert.ok(agreedIds.length > 0);
+  assert.deepEqual(agreed.items.map((c: any) => c.id).sort(), agreedIds);
+  assert.equal(agreed.items.length, r.kpi.approved);
+  const overdue = (await call(`${C(env)}/campaigns`, { as: 'igor.vasiliev', query: { year: '2027', overdue: '1' } })).json;
   assert.ok(overdue.items.length > 0 && overdue.items.every((c: any) => c.overdue));
+  assert.equal(overdue.items.length, r.kpi.overdue);
+  assert.deepEqual(overdue.kpi.by_stage, r.kpi.by_stage);
   const search = (await call(`${C(env)}/campaigns`, { as: 'igor.vasiliev', query: { q: 'ригла' } })).json;
   assert.ok(search.items.length > 0 && search.items.every((c: any) => c.network_name === 'Ригла' || /ригла/i.test(c.title)));
   const refs = await ref('anna.smirnova');
