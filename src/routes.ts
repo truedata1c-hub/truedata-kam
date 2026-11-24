@@ -39,9 +39,9 @@ export async function directory(q: Q, clientId: string): Promise<Dir> {
     'select id, name, permissions, archived from kam.business_role where client_id=$1', [clientId])).rows
     .map((r) => [r.id, { name: r.name, approve: r.permissions.includes('APPROVE'), archived: r.archived }]));
   const { rows: ur } = await q.query<{ id: string; name: string; role_id: string | null }>(
-    `select u.id, u.display_name name, ur.role_id from kam.membership m join kam.app_user u on u.id = m.user_id and not u.disabled
-       left join kam.user_business_role ur on ur.client_id = m.client_id and ur.user_id = u.id
-      where m.client_id = $1 and m.active`, [clientId]);
+    `select u.id, u.display_name name, ur.role_id from kam.employee_profile u
+       left join kam.user_business_role ur on ur.client_id = u.client_id and ur.user_id = u.id
+      where u.client_id = $1 and u.active and not u.disabled`, [clientId]);
   const users = new Map<string, Approver>();
   for (const r of ur) {
     const u = users.get(r.id) ?? { id: r.id, name: r.name, roles: new Set<string>(), approve: false, scopes: new Set<string>() };

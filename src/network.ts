@@ -106,7 +106,7 @@ export async function listActivities(ctx: Ctx, campaignId: string) {
     `select a.id, a.kind, a.at, a.status, a.purpose, a.outcome, a.contact_id, nc.name contact_name, nc.position contact_position,
             cb.display_name created_by_name, db.display_name done_by_name, a.done_at
        from kam.activity a left join kam.network_contact nc on nc.client_id = a.client_id and nc.id = a.contact_id
-       join kam.app_user cb on cb.id = a.created_by left join kam.app_user db on db.id = a.done_by
+       join kam.employee_profile cb on cb.client_id = a.client_id and cb.id = a.created_by left join kam.employee_profile db on db.client_id = a.client_id and db.id = a.done_by
       where a.client_id=$1 and a.campaign_id=$2 order by (a.status = 'PLANNED') desc, a.at desc`, [ctx.clientId, campaignId]);
   return { items: rows, can_edit: canEditFor(ctx, c.owner_id) && !['CANCELLED', 'CLOSED'].includes(c.stage) };
 }
@@ -181,8 +181,8 @@ export async function listComments(ctx: Ctx, campaignId: string) {
   await campaignOf(ctx.db, ctx, campaignId);
   const { rows } = await ctx.db.query(
     `select cc.id, cc.body, cc.created_at, cc.author_id, u.display_name author_name, cc.mentions,
-            coalesce((select json_agg(json_build_object('id', m.id, 'name', m.display_name)) from kam.app_user m where m.id = any(cc.mentions)), '[]') mentioned
-       from kam.campaign_comment cc join kam.app_user u on u.id = cc.author_id
+            coalesce((select json_agg(json_build_object('id', m.id, 'name', m.display_name)) from kam.employee_profile m where m.client_id = cc.client_id and m.id = any(cc.mentions)), '[]') mentioned
+       from kam.campaign_comment cc join kam.employee_profile u on u.client_id = cc.client_id and u.id = cc.author_id
       where cc.client_id=$1 and cc.campaign_id=$2 order by cc.created_at`, [ctx.clientId, campaignId]);
   return { items: rows.map(({ mentions: _m, ...r }) => ({ ...r, mine: r.author_id === ctx.principal.userId })), participants: await participants(ctx.db, ctx, campaignId) };
 }

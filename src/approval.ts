@@ -195,7 +195,7 @@ export async function decide(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
   await tx.query(
     `update kam.approval_step set status=$3, decided_by=$4, decided_for=$5, decision_comment=$6, decided_at=now() where client_id=$1 and id=$2`,
     [ctx.clientId, step.id, decision === 'APPROVE' ? 'APPROVED' : 'REJECTED', ctx.principal.userId, right.forUser, comment || null]);
-  const forName = right.forUser ? (await tx.query<{ n: string }>('select display_name n from kam.app_user where id=$1', [right.forUser])).rows[0]?.n ?? null : null;
+  const forName = right.forUser ? (await tx.query<{ n: string }>('select display_name n from kam.employee_profile where client_id=$1 and id=$2', [ctx.clientId, right.forUser])).rows[0]?.n ?? null : null;
   await campaignEvent(tx, ctx, campaignId, 'APPROVAL_DECISION', { comment: comment || null, payload: { round: a.round, step: step.position, title: step.title, decision, for_user: right.forUser, for_user_name: forName } });
   const c = await campaignLabel(tx, ctx.clientId, campaignId);
   const recipients = [c.owner_id];
@@ -260,17 +260,17 @@ export async function getApproval(ctx: Ctx, campaignId: string) {
     `select a.id, a.round, a.status, a.template_name, a.submitted_at, a.finished_at, a.submit_comment, a.submitted_by, su.display_name submitted_by_name,
             v.number version, a.total_investment::float8 investment, a.total_turnover::float8 turnover,
             a.tolerance_investment_pct::float8 tolerance_investment_pct, a.tolerance_turnover_pct::float8 tolerance_turnover_pct
-       from kam.approval a join kam.offer_version v on v.client_id = a.client_id and v.id = a.version_id join kam.app_user su on su.id = a.submitted_by
+       from kam.approval a join kam.offer_version v on v.client_id = a.client_id and v.id = a.version_id join kam.employee_profile su on su.client_id = a.client_id and su.id = a.submitted_by
       where a.client_id=$1 and a.campaign_id=$2 order by a.round desc`, [ctx.clientId, campaignId]);
   const { rows: steps } = await ctx.db.query(
     `select s.approval_id, s.id, s.position, s.title, s.assignee_rule, s.condition_text, s.status, s.skip_reason, s.assign_note, s.deadline_days,
             s.activated_at, s.due_date::text due_date, s.decided_at, s.decision_comment, s.candidates,
             db.display_name decided_by_name, df.display_name decided_for_name,
-            coalesce((select json_agg(json_build_object('id', u.id, 'name', u.display_name) order by u.display_name) from kam.app_user u where u.id = any(s.candidates)), '[]') candidate_users,
+            coalesce((select json_agg(json_build_object('id', u.id, 'name', u.display_name) order by u.display_name) from kam.employee_profile u where u.client_id = s.client_id and u.id = any(s.candidates)), '[]') candidate_users,
             coalesce((select json_agg(json_build_object('user', u.display_name, 'deputy', d.display_name, 'to', (upper(sb.valid) - 1)::text))
-                        from kam.substitution sb join kam.app_user u on u.id = sb.user_id join kam.app_user d on d.id = sb.deputy_id
+                        from kam.substitution sb join kam.employee_profile u on u.client_id = sb.client_id and u.id = sb.user_id join kam.employee_profile d on d.client_id = sb.client_id and d.id = sb.deputy_id
                        where sb.client_id = s.client_id and sb.user_id = any(s.candidates) and sb.valid @> current_date), '[]') deputies
-       from kam.approval_step s left join kam.app_user db on db.id = s.decided_by left join kam.app_user df on df.id = s.decided_for
+       from kam.approval_step s left join kam.employee_profile db on db.client_id = s.client_id and db.id = s.decided_by left join kam.employee_profile df on df.client_id = s.client_id and df.id = s.decided_for
       where s.client_id=$1 and s.campaign_id=$2 order by s.position`, [ctx.clientId, campaignId]);
   const day = await today(ctx.db);
   const byRound = rounds.map((r) => ({
@@ -284,7 +284,7 @@ export async function getApproval(ctx: Ctx, campaignId: string) {
     if (active) {
       const right = await decisionRight(ctx.db, ctx, active.candidates, c.owner_id);
       if (right.ok) {
-        const name = right.forUser ? (await ctx.db.query<{ n: string }>('select display_name n from kam.app_user where id=$1', [right.forUser])).rows[0]?.n ?? null : null;
+        const name = right.forUser ? (await ctx.db.query<{ n: string }>('select display_name n from kam.employee_profile where client_id=$1 and id=$2', [ctx.clientId, right.forUser])).rows[0]?.n ?? null : null;
         my = { step_id: active.id, for_user: name };
       }
     }
@@ -331,7 +331,7 @@ export async function myDecisions(ctx: Ctx, status: string | undefined) {
             c.id campaign_id, c.number, c.title, c.period_from, c.period_to, c.stage, n.name network, t.name type_name, coalesce(ow.display_name, 'КАМ не назначен') owner,
             a.round, a.total_investment::float8 investment, a.total_turnover::float8 turnover, v.number version, sub.display_name submitted_by,
             df.display_name decided_for,
-            (case when not (s.candidates @> array[$2::uuid]) then (select string_agg(u.display_name, ', ') from kam.substitution sb join kam.app_user u on u.id = sb.user_id
+            (case when not (s.candidates @> array[$2::uuid]) then (select string_agg(u.display_name, ', ') from kam.substitution sb join kam.employee_profile u on u.client_id = sb.client_id and u.id = sb.user_id
                where sb.client_id = s.client_id and sb.deputy_id = $2 and sb.valid @> current_date and sb.user_id is distinct from c.owner_id and sb.user_id = any(s.candidates)) end) on_behalf_of
        from kam.approval_step s
        join kam.approval a on a.client_id = s.client_id and a.id = s.approval_id
@@ -339,9 +339,9 @@ export async function myDecisions(ctx: Ctx, status: string | undefined) {
        join kam.campaign_with_owner c on c.client_id = s.client_id and c.id = s.campaign_id
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
        join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
-       left join kam.app_user ow on ow.id = c.owner_id
-       join kam.app_user sub on sub.id = a.submitted_by
-       left join kam.app_user df on df.id = s.decided_for
+       left join kam.employee_profile ow on ow.client_id = c.client_id and ow.id = c.owner_id
+       join kam.employee_profile sub on sub.client_id = a.client_id and sub.id = a.submitted_by
+       left join kam.employee_profile df on df.client_id = s.client_id and df.id = s.decided_for
       where s.client_id = $1 and ${who}
       order by ${done ? 's.decided_at desc' : 's.due_date, s.activated_at'} limit 200`, params);
   return {
@@ -367,12 +367,12 @@ export async function listSubstitutions(ctx: Ctx) {
   const { rows } = await ctx.db.query(
     `select s.id, s.user_id, u.display_name user_name, s.deputy_id, d.display_name deputy_name, lower(s.valid)::text "from", (upper(s.valid) - 1)::text "to",
             s.comment, (s.valid @> current_date) active, (upper(s.valid) <= current_date) past
-       from kam.substitution s join kam.app_user u on u.id = s.user_id join kam.app_user d on d.id = s.deputy_id
+       from kam.substitution s join kam.employee_profile u on u.client_id = s.client_id and u.id = s.user_id join kam.employee_profile d on d.client_id = s.client_id and d.id = s.deputy_id
       where s.client_id=$1 and ($2 or s.user_id = $3 or s.deputy_id = $3) and upper(s.valid) > current_date - 30
       order by lower(s.valid) desc`, [ctx.clientId, all, ctx.principal.userId]);
   const { rows: people } = await ctx.db.query(
-    `select u.id, u.display_name name from kam.membership m join kam.app_user u on u.id = m.user_id and not u.disabled
-      where m.client_id=$1 and m.active order by u.display_name`, [ctx.clientId]);
+    `select u.id, u.display_name name from kam.employee_profile u
+      where u.client_id=$1 and u.active and not u.disabled order by u.display_name`, [ctx.clientId]);
   return { items: rows, people, can_manage_all: all };
 }
 

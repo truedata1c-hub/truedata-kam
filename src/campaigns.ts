@@ -80,7 +80,7 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
                            where ov.client_id = c.client_id and ov.campaign_id = c.id order by number desc limit 1) v on true
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
        join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
-       left join kam.app_user u on u.id = c.owner_id
+       left join kam.employee_profile u on u.client_id = c.client_id and u.id = c.owner_id
       where ${where.join(' and ')}
       order by (c.stage = any(array['CANCELLED','CLOSED'])), c.control_date, n.name
       limit 1000`, params);
@@ -119,8 +119,8 @@ async function loadVisible(ctx: Ctx, id: string, q: Pick<Tx, 'query'> = ctx.db) 
        from kam.campaign_with_owner c
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
        join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
-       left join kam.app_user u on u.id = c.owner_id
-       join kam.app_user cb on cb.id = c.created_by
+       left join kam.employee_profile u on u.client_id = c.client_id and u.id = c.owner_id
+       join kam.employee_profile cb on cb.client_id = c.client_id and cb.id = c.created_by
       where c.client_id = $1 and c.id = $2 and ${vis.sql}`, [ctx.clientId, id, ...vis.params]);
   if (!rows[0]) throw notFound();
   return rows[0] as Record<string, any> & { id: string; stage: Stage; owner_id: string | null; network_id: string; revision: number };
@@ -156,7 +156,7 @@ export async function getCampaign(ctx: Ctx, id: string) {
       order by le.name`, [ctx.clientId, c.network_id, c.id]);
   const { rows: events } = await ctx.db.query(
     `select e.id, e.kind, e.from_stage, e.to_stage, e.comment, e.payload, e.at, u.display_name actor_name
-       from kam.campaign_event e left join kam.app_user u on u.id = e.actor
+       from kam.campaign_event e left join kam.employee_profile u on u.client_id = e.client_id and u.id = e.actor
       where e.client_id = $1 and e.campaign_id = $2 order by e.at desc, e.id`, [ctx.clientId, c.id]);
   const overdue = c.control_date < todayIso() && OPEN_STAGES.includes(c.stage);
   return {

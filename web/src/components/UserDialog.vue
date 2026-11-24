@@ -2,15 +2,31 @@
   <q-dialog :model-value="true" @hide="emit('close')">
     <div class="q-card tdDialog wide">
       <div class="dlgHead">
-        <div><div class="dlgTitle">{{ user.display_name }}</div><div class="dlgSub">{{ user.email }}{{ user.sso ? ' · входит из платформы' : '' }}</div></div>
+        <div><div class="dlgTitle">{{ user.display_name }}</div>
+          <div v-if="tab !== 'profile'" class="dlgSub">{{ user.email }}{{ user.sso ? ' · входит из платформы' : '' }}</div>
+        </div>
         <div class="spacer" /><button v-close-popup class="iconBtn" aria-label="Закрыть"><Icon id="x-close" :size="18" /></button>
       </div>
       <div class="subTabs" role="tablist">
-        <button v-for="t in tabs" :key="t.key" role="tab" :class="{ active: tab === t.key }" @click="tab = t.key">{{ t.label }}</button>
+        <button v-for="t in tabs" :key="t.key" role="tab" :aria-selected="tab === t.key" :class="{ active: tab === t.key }" @click="tab = t.key">{{ t.label }}</button>
       </div>
       <div class="dlgBody" style="padding-top: 14px">
+        <form v-if="tab === 'profile'" id="employee-profile" class="formGrid" @submit.prevent="saveProfile">
+          <div class="full">
+            <label class="fieldLabel" for="employee-name">Фамилия, имя, отчество<span class="req">*</span></label>
+            <q-input for="employee-name" v-model="displayName" outlined dense maxlength="120" hide-bottom-space
+              :disable="busy" :error="err.field === 'display_name'" aria-describedby="employee-name-hint" />
+            <div class="fieldHint" id="employee-name-hint">Отчество можно пропустить.</div>
+          </div>
+          <div class="full">
+            <label class="fieldLabel" for="employee-email">Почта для входа</label>
+            <q-input for="employee-email" :model-value="user.email" type="email" outlined dense readonly hide-bottom-space />
+            <div v-if="user.sso" class="fieldHint">Сотрудник входит через платформу TrueData.</div>
+          </div>
+        </form>
+
         <!-- Роли и бренды -->
-        <template v-if="tab === 'roles'">
+        <template v-else-if="tab === 'roles'">
           <div class="choiceGrid">
             <label v-for="r in activeRoles" :key="r.id" class="choice" :class="{ on: roleIds.includes(r.id) }">
               <input v-model="roleIds" type="checkbox" :value="r.id" />
@@ -85,6 +101,7 @@
       </div>
       <div class="dlgFoot">
         <button v-close-popup class="tdBtn">Закрыть</button>
+        <button v-if="tab === 'profile'" form="employee-profile" type="submit" class="tdBtn primary" :disabled="busy || !nameChanged">Сохранить</button>
         <button v-if="tab === 'roles' || tab === 'access'" class="tdBtn primary" :disabled="busy" @click="saveMain">Сохранить</button>
         <button v-if="tab === 'manager'" class="tdBtn primary" :disabled="busy" @click="saveManager">Назначить</button>
       </div>
@@ -96,7 +113,7 @@
 import { computed, ref, watch } from 'vue';
 import { useQuasar } from 'quasar';
 import { api } from '../api';
-import { base, state } from '../store';
+import { base, loadMe, state } from '../store';
 import { useCommand } from '../command';
 import { PERMISSION_LABEL, SCOPE_LABEL, fmtDate } from '../format';
 import type { Role, User } from '../types';
@@ -107,8 +124,11 @@ const props = defineProps<{ user: User; users: User[]; roles: Role[] }>();
 const emit = defineEmits<{ close: []; changed: [] }>();
 const $q = useQuasar();
 const { err, busy, run } = useCommand();
-const tabs = [{ key: 'roles', label: 'Роли' }, { key: 'manager', label: 'Руководитель' }, { key: 'networks', label: 'Сети' }, { key: 'access', label: 'Доступ' }];
-const tab = ref('roles');
+const tabs = [{ key: 'profile', label: 'Профиль' }, { key: 'roles', label: 'Роли' }, { key: 'manager', label: 'Руководитель' }, { key: 'networks', label: 'Сети' }, { key: 'access', label: 'Доступ' }];
+const tab = ref('profile');
+const displayName = ref(props.user.display_name);
+const normalizedName = computed(() => displayName.value.trim().replace(/\s+/g, ' '));
+const nameChanged = computed(() => Boolean(normalizedName.value && normalizedName.value !== props.user.display_name));
 const today = new Intl.DateTimeFormat('en-CA', { timeZone: state.ref?.time_zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
 const roleIds = ref([...props.user.role_ids]);
@@ -136,6 +156,15 @@ watch([newNetwork, newFrom, tab], () => {
 
 const done = (msg: string) => { $q.notify({ type: 'positive', message: msg }); emit('changed'); };
 
+async function saveProfile() {
+  if (busy.value || !nameChanged.value) return;
+  const name = normalizedName.value;
+  const r = await run(() => api.patch(`${base()}/users/${props.user.id}`, { display_name: name }));
+  if (!r) return;
+  displayName.value = name;
+  done('ФИО сохранено');
+  if (props.user.me) await loadMe(state.companyId);
+}
 async function saveMain() {
   const r = await run(() => api.patch(`${base()}/users/${props.user.id}`, { role_ids: roleIds.value, brand_ids: brandIds.value, active: active.value }));
   if (r) done('Сохранено');

@@ -95,7 +95,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   app.addHook('onRequest', async (req) => {
     if (!req.url.startsWith('/api/')) return;
-    req.principal = await principalFromToken(opts.db, tokenOf(req));
+    req.principal = await principalFromToken(opts.db, tokenOf(req), (req.params as { clientId?: string }).clientId);
     if (req.principal?.mustChangePassword && req.method !== 'GET' && !req.url.startsWith(`${BASE}/me/password`) && !req.url.startsWith(`${BASE}/auth/`)) {
       throw new ApiError(403, 'PASSWORD_CHANGE_REQUIRED', 'Смените временный пароль, чтобы продолжить работу.');
     }
@@ -153,7 +153,9 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     const p = me(req);
     const ids = [...p.clientIds];
     const clients = ids.length
-      ? (await opts.db.query<{ id: string; code: string; name: string }>('select id, code, name from kam.client where id = any($1) order by name', [ids])).rows
+      ? (await opts.db.query<{ id: string; code: string; name: string; display_name: string }>(
+        `select c.id, c.code, c.name, u.display_name from kam.client c join kam.employee_profile u on u.client_id = c.id
+          where c.id = any($1) and u.id = $2 order by c.name`, [ids, p.userId])).rows
       : [];
     const companies = [];
     for (const c of clients) {

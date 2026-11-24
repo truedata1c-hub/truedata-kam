@@ -68,7 +68,7 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
     `select c.id, c.stage, c.network_id, n.name network, c.owner_id, coalesce(u.display_name, 'КАМ не назначен') owner, c.period_from::text period_from, c.period_to::text period_to,
             (c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL'])) overdue,
             v.id version_id, coalesce(v.total_investment, 0)::float8 investment, coalesce(v.total_turnover, 0)::float8 turnover, c.stage_changed_at
-       from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id left join kam.app_user u on u.id = c.owner_id
+       from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id left join kam.employee_profile u on u.client_id = c.client_id and u.id = c.owner_id
        left join lateral (select id, total_investment, total_turnover from kam.offer_version ov where ov.client_id = c.client_id and ov.campaign_id = c.id
                           order by number desc limit 1) v on true
       where ${W}`, params);
@@ -197,12 +197,12 @@ export async function analytics(ctx: Ctx, q: AnalyticsQuery) {
   const { rows: pulse } = ids.length ? await ctx.db.query(
     `select a.id, a.campaign_id, a.kind, a.at, a.status, a.purpose, a.outcome, nc.name contact, c.title, n.name network, u.display_name owner
        from kam.activity a join kam.campaign c on c.client_id = a.client_id and c.id = a.campaign_id join kam.network n on n.client_id = c.client_id and n.id = c.network_id
-       join kam.app_user u on u.id = a.created_by left join kam.network_contact nc on nc.client_id = a.client_id and nc.id = a.contact_id
+       join kam.employee_profile u on u.client_id = a.client_id and u.id = a.created_by left join kam.network_contact nc on nc.client_id = a.client_id and nc.id = a.contact_id
       where a.client_id=$1 and a.campaign_id = any($2::uuid[]) and a.status = 'DONE' order by a.at desc limit 15`, [ctx.clientId, ids]) : { rows: [] };
   const { rows: upcoming } = ids.length ? await ctx.db.query(
     `select a.id, a.campaign_id, a.kind, a.at, a.purpose, nc.name contact, c.title, n.name network, u.display_name owner
        from kam.activity a join kam.campaign c on c.client_id = a.client_id and c.id = a.campaign_id join kam.network n on n.client_id = c.client_id and n.id = c.network_id
-       join kam.app_user u on u.id = a.created_by left join kam.network_contact nc on nc.client_id = a.client_id and nc.id = a.contact_id
+       join kam.employee_profile u on u.client_id = a.client_id and u.id = a.created_by left join kam.network_contact nc on nc.client_id = a.client_id and nc.id = a.contact_id
       where a.client_id=$1 and a.campaign_id = any($2::uuid[]) and a.status = 'PLANNED' and a.at >= now() - interval '1 day' order by a.at limit 10`, [ctx.clientId, ids]) : { rows: [] };
 
   const inv = counted.reduce((a, c) => a + c.investment, 0);

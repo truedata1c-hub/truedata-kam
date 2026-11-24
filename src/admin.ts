@@ -100,20 +100,19 @@ async function ensureOtherAdmin(tx: Tx, ctx: Ctx, o: { roleId?: string; userId?:
 export async function listUsers(ctx: Ctx) {
   requirePermission(ctx, 'ADMIN');
   const { rows } = await ctx.db.query(
-    `select u.id, u.email, u.display_name, u.disabled, u.last_login_at, u.must_change_password, m.active,
-            (u.password_hash is not null) has_password,
+    `select u.id, u.email, u.display_name, u.disabled, u.last_login_at, u.must_change_password, u.active, u.has_password,
             exists (select 1 from kam.external_identity x where x.user_id = u.id) sso,
-            coalesce((select array_agg(ur.role_id) from kam.user_business_role ur where ur.client_id = m.client_id and ur.user_id = u.id), '{}') role_ids,
-            coalesce((select array_agg(ub.brand_id) from kam.user_brand ub where ub.client_id = m.client_id and ub.user_id = u.id), '{}') brand_ids,
+            coalesce((select array_agg(ur.role_id) from kam.user_business_role ur where ur.client_id = u.client_id and ur.user_id = u.id), '{}') role_ids,
+            coalesce((select array_agg(ub.brand_id) from kam.user_brand ub where ub.client_id = u.client_id and ub.user_id = u.id), '{}') brand_ids,
             (select json_build_object('id', mg.id, 'manager_id', mg.manager_id, 'name', mu.display_name, 'from', lower(mg.valid))
-               from kam.user_manager mg join kam.app_user mu on mu.id = mg.manager_id
-              where mg.client_id = m.client_id and mg.user_id = u.id and mg.valid @> current_date) manager,
+               from kam.user_manager mg join kam.employee_profile mu on mu.client_id = mg.client_id and mu.id = mg.manager_id
+              where mg.client_id = u.client_id and mg.user_id = u.id and mg.valid @> current_date) manager,
             coalesce((select json_agg(json_build_object('id', ka.id, 'network_id', ka.network_id, 'network_name', n.name,
                        'from', lower(ka.valid), 'to', upper(ka.valid) - 1) order by n.name)
                from kam.kam_assignment ka join kam.network n on n.client_id = ka.client_id and n.id = ka.network_id
-              where ka.client_id = m.client_id and ka.user_id = u.id and (upper_inf(ka.valid) or upper(ka.valid) > current_date)), '[]') assignments
-       from kam.membership m join kam.app_user u on u.id = m.user_id
-      where m.client_id = $1 order by not m.active, u.display_name`, [ctx.clientId]);
+              where ka.client_id = u.client_id and ka.user_id = u.id and (upper_inf(ka.valid) or upper(ka.valid) > current_date)), '[]') assignments
+       from kam.employee_profile u
+      where u.client_id = $1 order by not u.active, u.display_name`, [ctx.clientId]);
   return { items: rows.map((r) => ({ ...r, me: r.id === ctx.principal.userId })) };
 }
 
@@ -157,11 +156,23 @@ async function lockMember(tx: Tx, ctx: Ctx, userId: string) {
   return m;
 }
 
-/** Роли, бренды и активность сотрудника в клиенте. */
+/** ФИО, роли, бренды и доступ сотрудника в компании. */
 export async function updateUser(tx: Tx, ctx: Ctx, userId: string, b: Record<string, unknown>): Promise<CommandResult> {
   requirePermission(ctx, 'ADMIN');
   const m = await lockMember(tx, ctx, userId);
+  if ('email' in b) throw invalid('email', 'Почта для входа доступна только для просмотра.');
+  let before: { display_name: string } | undefined;
   const after: Record<string, unknown> = {};
+  if (b.display_name !== undefined) {
+    const name = text(b.display_name, 'display_name', 120);
+    const { rows: [profile] } = await tx.query<{ display_name: string }>(
+      'select display_name from kam.employee_profile where client_id=$1 and id=$2', [ctx.clientId, userId]);
+    if (profile!.display_name !== name) {
+      await tx.query('update kam.membership set display_name=$3 where client_id=$1 and user_id=$2', [ctx.clientId, userId, name]);
+      before = profile;
+      after.display_name = name;
+    }
+  }
   if (b.role_ids !== undefined) {
     const roles = await roleIds(tx, ctx, b.role_ids);
     await tx.query('delete from kam.user_business_role where client_id=$1 and user_id=$2', [ctx.clientId, userId]);
@@ -184,7 +195,7 @@ export async function updateUser(tx: Tx, ctx: Ctx, userId: string, b: Record<str
     after.active = active;
   }
   await ensureOtherAdmin(tx, ctx, {});
-  await audit(tx, ctx, { entityType: 'user', entityId: userId, action: 'UPDATE', after });
+  if (Object.keys(after).length) await audit(tx, ctx, { entityType: 'user', entityId: userId, action: 'UPDATE', before, after });
   return { status: 200, body: { id: userId } };
 }
 
@@ -241,7 +252,7 @@ export async function addAssignment(tx: Tx, ctx: Ctx, userId: string, b: Record<
   if (!network) throw invalid('network_id', 'Сеть не найдена.');
   const { rows: [holder] } = await tx.query<{ user_id: string; display_name: string; ended: boolean }>(
     `select a.user_id, u.display_name, coalesce(upper(a.valid) <= current_date, false) as ended
-       from kam.kam_assignment a join kam.app_user u on u.id = a.user_id
+       from kam.kam_assignment a join kam.employee_profile u on u.client_id = a.client_id and u.id = a.user_id
       where a.client_id=$1 and a.network_id=$2 and a.valid && daterange($3::date, $4::date, '[]')
       order by lower(a.valid) limit 1`, [ctx.clientId, b.network_id, from, to]);
   if (holder) {
@@ -289,7 +300,7 @@ export async function listNetworks(ctx: Ctx) {
             coalesce((select json_agg(json_build_object('id', le.id, 'inn', le.inn, 'name', le.name, 'active', le.active) order by le.name)
                from kam.legal_entity le where le.client_id = n.client_id and le.network_id = n.id), '[]') legal_entities,
             coalesce((select json_agg(json_build_object('user_id', u.id, 'name', u.display_name) order by u.display_name)
-               from kam.kam_assignment ka join kam.app_user u on u.id = ka.user_id
+               from kam.kam_assignment ka join kam.employee_profile u on u.client_id = ka.client_id and u.id = ka.user_id
               where ka.client_id = n.client_id and ka.network_id = n.id and ka.valid @> current_date), '[]') kams,
             (select count(*)::int from kam.campaign c where c.client_id = n.client_id and c.network_id = n.id) campaigns
        from kam.network n left join kam.network_group g on g.client_id = n.client_id and g.id = n.group_id
@@ -430,6 +441,6 @@ export async function listAudit(ctx: Ctx, q: { entity_type?: string; before?: st
   if (q.before && !Number.isNaN(Date.parse(q.before))) { params.push(q.before); where += ` and a.recorded_at < $${params.length}`; }
   const { rows } = await ctx.db.query(
     `select a.id, a.entity_type, a.entity_id, a.action, a.before, a.after, a.reason, a.recorded_at, u.display_name actor_name
-       from kam.audit_event a join kam.app_user u on u.id = a.actor where ${where} order by a.recorded_at desc limit 200`, params);
+       from kam.audit_event a join kam.employee_profile u on u.client_id = a.client_id and u.id = a.actor where ${where} order by a.recorded_at desc limit 200`, params);
   return { items: rows };
 }

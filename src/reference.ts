@@ -19,18 +19,17 @@ export async function reference(ctx: Ctx) {
   // Ответственные для фильтра портфеля: сотрудники, ведущие кампании, в области видимости.
   const users = seesAll(ctx.access) ? null : (ctx.access.scopes.has('SUBORDINATES') ? ctx.access.team : [ctx.principal.userId]);
   const { rows: owners } = await ctx.db.query(
-    `select distinct u.id, u.display_name name from kam.membership m join kam.app_user u on u.id = m.user_id
-       join kam.user_business_role ur on ur.client_id = m.client_id and ur.user_id = m.user_id
+    `select distinct u.id, u.display_name name from kam.employee_profile u
+       join kam.user_business_role ur on ur.client_id = u.client_id and ur.user_id = u.id
        join kam.business_role r on r.client_id = ur.client_id and r.id = ur.role_id and not r.archived and 'CAMPAIGN_EDIT' = any(r.permissions)
-      where m.client_id = $1 and m.active and ($2::uuid[] is null or u.id = any($2::uuid[])) order by name`, [ctx.clientId, users]);
+      where u.client_id = $1 and u.active and ($2::uuid[] is null or u.id = any($2::uuid[])) order by name`, [ctx.clientId, users]);
   // Сети, в которых пользователь может создавать кампании, и их текущие ответственные.
   const p = ctx.access.permissions;
   const candidates = [...new Set([...(p.has('CAMPAIGN_EDIT') ? [ctx.principal.userId] : []), ...(p.has('CAMPAIGN_EDIT_SUBORDINATES') ? ctx.access.team : [])])];
   const { rows: assignable } = candidates.length ? await ctx.db.query(
     `select u.id, u.display_name name, array_agg(ka.network_id order by ka.network_id) network_ids
-       from kam.kam_assignment ka join kam.app_user u on u.id = ka.user_id
-       join kam.membership m on m.client_id = ka.client_id and m.user_id = ka.user_id and m.active
-      where ka.client_id = $1 and ka.user_id = any($2::uuid[]) and ka.valid @> current_date
+       from kam.kam_assignment ka join kam.employee_profile u on u.client_id = ka.client_id and u.id = ka.user_id
+      where ka.client_id = $1 and u.active and ka.user_id = any($2::uuid[]) and ka.valid @> current_date
         and exists (select 1 from kam.user_business_role ur join kam.business_role r on r.client_id = ur.client_id and r.id = ur.role_id
                      where ur.client_id = ka.client_id and ur.user_id = ka.user_id and not r.archived and 'CAMPAIGN_EDIT' = any(r.permissions))
       group by u.id, u.display_name order by (u.id = $3) desc, u.display_name`, [ctx.clientId, candidates, ctx.principal.userId]) : { rows: [] };

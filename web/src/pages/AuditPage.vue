@@ -41,6 +41,7 @@ const type = ref<string | null>(null);
 
 function summary(a: Entry): string {
   const x = a.after ?? {};
+  if (a.entity_type === 'user' && a.before?.display_name && x.display_name) return `${a.before.display_name} → ${x.display_name}`;
   if (x.title) return x.title;
   if (x.name) return x.name;
   if (x.inn) return `ИНН ${x.inn}`;

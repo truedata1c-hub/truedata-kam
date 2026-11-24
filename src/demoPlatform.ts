@@ -33,8 +33,8 @@ export async function demoPlatform(app: FastifyInstance, db: Db, cfg: DemoPlatfo
     if (!authorized(req, cfg.password)) return challenge(reply);
     const { rows } = await db.query<{ email: string; name: string; roles: string }>(
       `select u.email, u.display_name name, coalesce(string_agg(r.name, ', ' order by r.name), 'без роли') roles
-         from kam.client c join kam.membership m on m.client_id = c.id and m.active join kam.app_user u on u.id = m.user_id and not u.disabled
-         left join kam.user_business_role ur on ur.client_id = m.client_id and ur.user_id = m.user_id
+         from kam.client c join kam.employee_profile u on u.client_id = c.id and u.active and not u.disabled
+         left join kam.user_business_role ur on ur.client_id = u.client_id and ur.user_id = u.id
          left join kam.business_role r on r.client_id = ur.client_id and r.id = ur.role_id and not r.archived
         where c.code = $1 group by u.email, u.display_name order by u.display_name`, [cfg.clientCode]);
     const options = rows.map((r) => `<option value="${esc(r.email)}">${esc(r.name)} — ${esc(r.roles)}</option>`).join('');
@@ -45,8 +45,8 @@ export async function demoPlatform(app: FastifyInstance, db: Db, cfg: DemoPlatfo
     if (!authorized(req, cfg.password)) return challenge(reply);
     const email = String((req.body as { email?: unknown } | null)?.email ?? '').toLowerCase();
     const u = (await db.query<{ id: string; display_name: string }>(
-      `select u.id, u.display_name from kam.app_user u join kam.membership m on m.user_id = u.id and m.active
-         join kam.client c on c.id = m.client_id and c.code = $2 where u.email = $1`, [email, cfg.clientCode])).rows[0];
+      `select u.id, u.display_name from kam.employee_profile u join kam.client c on c.id = u.client_id
+        where u.email = $1 and c.code = $2 and u.active and not u.disabled`, [email, cfg.clientCode])).rows[0];
     if (!u) return reply.status(404).send({ error: { code: 'NOT_FOUND', message: 'Пользователь не найден.' } });
     // Демо-платформа представляет пользователя его же идентификатором — как это сделала бы настоящая платформа.
     const token = signToken(cfg.privateKey, { iss: cfg.issuer, aud: cfg.audience, sub: `demo:${u.id}`, email, name: u.display_name, client: cfg.clientCode });

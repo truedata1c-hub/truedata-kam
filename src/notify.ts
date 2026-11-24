@@ -68,7 +68,7 @@ export async function notify(q: Q, clientId: string, n: NotifyInput): Promise<nu
 export async function listNotifications(ctx: Ctx, q: { unread?: string }) {
   const { rows } = await ctx.db.query(
     `select n.id, n.kind, n.title, n.body, n.campaign_id, n.created_at, n.read_at, a.display_name actor_name
-       from kam.notification n left join kam.app_user a on a.id = n.actor_id
+       from kam.notification n left join kam.employee_profile a on a.client_id = n.client_id and a.id = n.actor_id
       where n.client_id=$1 and n.user_id=$2 ${q.unread === '1' ? 'and n.read_at is null' : ''}
       order by n.created_at desc limit 50`, [ctx.clientId, ctx.principal.userId]);
   const unread = (await ctx.db.query<{ n: number }>('select count(*)::int n from kam.notification where client_id=$1 and user_id=$2 and read_at is null',
