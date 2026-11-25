@@ -1,8 +1,8 @@
 import pg from 'pg';
-import { APP_TZ } from './time.js';
 import { readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { APP_TZ } from './time.js';
 
 export type Db = pg.Pool;
 export type Tx = pg.PoolClient;
@@ -11,6 +11,7 @@ export type Tx = pg.PoolClient;
 pg.types.setTypeParser(1082, (v) => v);
 
 export function createPool(connectionString: string): Db {
+  // current_date и даты в SQL — в часовом поясе модуля, как и todayIso() в коде.
   const pool = new pg.Pool({ connectionString, max: 10, options: `-c TimeZone=${APP_TZ}` });
   // Простаивающее соединение может оборваться (перезапуск PostgreSQL, сеть). Без обработчика это роняет процесс;
   // пул сам заменит соединение, а запросы получат ошибку и повторятся по своим правилам.

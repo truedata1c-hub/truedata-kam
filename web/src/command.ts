@@ -16,7 +16,8 @@ export function useCommand() {
       return await fn();
     } catch (e) {
       if (e instanceof ApiError && e.status === 412 && e.code === 'STALE_REVISION') {
-        err.message = 'Кампанию изменил другой пользователь. Закройте окно, обновите карточку и повторите.';
+        err.message = e.details?.owner_changed ? `${e.message} Закройте окно и повторите.` : 'Кампанию изменил другой пользователь. Закройте окно, обновите карточку и повторите.';
+        err.details = e.details ?? {};
         err.code = e.code;
       } else if (e instanceof ApiError) {
         err.field = e.field;

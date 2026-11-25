@@ -151,3 +151,30 @@ test('тип кампании: деление периода нельзя мен
   const ok = await call(`${C(env)}/campaign-types/${t}`, { as: 'admin', method: 'PUT', body: { name: 'Годовые условия', period_split: 'QUARTER', control_days: 45 } });
   assert.equal(ok.status, 200);
 });
+
+test('сброс пароля не даёт доступа к другой компании и не выдаёт пароль пользователю платформы', async () => {
+  // Администратор DEMO приглашает сотрудника другой компании модуля: членство появляется, но пароль чужого сотрудника он не сбросит.
+  const invite = await call(`${C(env)}/users`, { as: 'admin', body: { email: 'admin@other.test', display_name: 'Чужой', role_ids: [] } });
+  assert.equal(invite.status, 201, invite.body);
+  assert.equal(invite.json.temporary_password, null);
+  const shared = await call(`${C(env)}/users/${invite.json.id}/password-reset`, { as: 'admin', body: {} });
+  assert.equal(shared.status, 422);
+  assert.equal(shared.json.error.code, 'USER_SHARED');
+  await env.login('admin@other.test'); // прежний пароль действует
+
+  // Пользователь, пришедший только из платформы, пароля модуля не получает.
+  const sso = (await env.db.query<{ id: string }>("insert into kam.app_user(id, email, display_name) values (gen_random_uuid(), 'platform.only@demo.test', 'Из платформы') returning id")).rows[0]!.id;
+  await env.db.query("insert into kam.external_identity(issuer, subject, user_id) values ('test-platform', 'p-1', $1)", [sso]);
+  await env.db.query('insert into kam.membership(client_id, user_id) values ($1,$2)', [env.demo, sso]);
+  const ssoReset = await call(`${C(env)}/users/${sso}/password-reset`, { as: 'admin', body: {} });
+  assert.equal(ssoReset.json.error.code, 'SSO_USER');
+
+  // Сотрудник только этой компании — сброс работает.
+  const own = await call(`${C(env)}/users`, { as: 'admin', body: { email: 'solo@demo.test', display_name: 'Свой', role_ids: [] } });
+  const ok = await call(`${C(env)}/users/${own.json.id}/password-reset`, { as: 'admin', body: {} });
+  assert.equal(ok.status, 200, ok.body);
+  assert.match(ok.json.temporary_password, /^[A-Za-z0-9]{16}$/);
+  // После первого входа из платформы пароль ему уже не выдаётся, даже если он у него был.
+  await env.db.query("insert into kam.external_identity(issuer, subject, user_id) values ('test-platform', 'p-2', $1)", [own.json.id]);
+  assert.equal((await call(`${C(env)}/users/${own.json.id}/password-reset`, { as: 'admin', body: {} })).json.error.code, 'SSO_USER');
+});

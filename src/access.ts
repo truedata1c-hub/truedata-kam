@@ -68,14 +68,17 @@ export function campaignVisibility(ctx: Ctx, start: number): { sql: string; para
   const a = ctx.access;
   if (seesAll(a)) return { sql: 'true', params: [] };
   const users = a.scopes.has('SUBORDINATES') ? a.team : [ctx.principal.userId];
+  // Пока сеть свободна, её кампании видят руководители последнего КАМа сети (сам прежний КАМ — уже нет).
+  const supervised = a.scopes.has('SUBORDINATES') ? a.team.filter((u) => u !== ctx.principal.userId) : [];
   // Согласующий видит кампанию, по которой он исполнитель шага (или замещает исполнителя), даже вне своей области.
   return {
     sql: `(c.owner_id = any($${start}::uuid[])
+          or (c.owner_id is null and c.last_owner_id = any($${start + 2}::uuid[]))
           or exists (select 1 from kam.approval_step st where st.client_id = c.client_id and st.campaign_id = c.id
                and (st.candidates @> array[$${start + 1}::uuid] or st.decided_by = $${start + 1}
                     or exists (select 1 from kam.substitution sb where sb.client_id = st.client_id and sb.deputy_id = $${start + 1}
                                  and sb.valid @> current_date and sb.user_id = any(st.candidates)))))`,
-    params: [users, ctx.principal.userId],
+    params: [users, ctx.principal.userId, supervised],
   };
 }
 
@@ -89,10 +92,16 @@ export async function visibleNetworkIds(ctx: Ctx, q: Q = ctx.db): Promise<string
   return rows.map((r) => r.network_id);
 }
 
-/** Может ли пользователь вести кампанию с этим ответственным. */
-export function canEditFor(ctx: Ctx, ownerId: string | null): boolean {
-  if (!ownerId) return false;
+/**
+ * Может ли пользователь вести кампанию с этим ответственным. Если сеть свободна (ответственного нет),
+ * кампанию ведёт руководитель последнего КАМа сети с правом «Вести кампании подчинённых».
+ */
+export function canEditFor(ctx: Ctx, ownerId: string | null, lastOwnerId: string | null = null): boolean {
   const p = ctx.access.permissions;
+  if (!ownerId) {
+    return Boolean(lastOwnerId) && lastOwnerId !== ctx.principal.userId
+      && p.has('CAMPAIGN_EDIT_SUBORDINATES') && ctx.access.team.includes(lastOwnerId!);
+  }
   if (ownerId === ctx.principal.userId && p.has('CAMPAIGN_EDIT')) return true;
   return p.has('CAMPAIGN_EDIT_SUBORDINATES') && ctx.access.team.includes(ownerId);
 }

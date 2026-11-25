@@ -70,6 +70,22 @@ test('встраивание разрешено только адресам пл
   assert.equal(open.statusCode, 303);
 });
 
+test('сессия в cookie: изменяющий запрос без служебного заголовка отклоняется (защита от межсайтовых запросов)', async () => {
+  const res = await sso(signToken(env.keys.privatePem, claims()));
+  const cookie = /kam_session=[^;]+/.exec(String(res.headers['set-cookie']))![0];
+  const url = `${C(env)}/notifications/read`;
+  const bare = await env.app.inject({ method: 'POST', url, headers: { cookie }, payload: { all: true } });
+  assert.equal(bare.statusCode, 403);
+  assert.equal(bare.json().error.code, 'CSRF_HEADER_REQUIRED');
+  // Тот же запрос из интерфейса модуля несёт Idempotency-Key и проходит; чтение заголовка не требует.
+  const ok = await env.app.inject({ method: 'POST', url, headers: { cookie, 'idempotency-key': crypto.randomUUID() }, payload: { all: true } });
+  assert.equal(ok.statusCode, 200, ok.body);
+  assert.equal((await env.app.inject({ method: 'GET', url: `${C(env)}/notifications`, headers: { cookie } })).statusCode, 200);
+  // Загрузка файла (multipart) тоже требует заголовка.
+  const upload = await env.app.inject({ method: 'POST', url: `${C(env)}/prior-periods/import`, headers: { cookie, 'content-type': 'multipart/form-data; boundary=x' }, payload: '--x--\r\n' });
+  assert.equal(upload.json().error.code, 'CSRF_HEADER_REQUIRED');
+});
+
 test('исправленное ФИО видно в кампаниях своей компании и сохраняется при повторном входе из платформы', async () => {
   const email = 'dmitry.petrov@demo.test';
   const fullName = 'Петров Дмитрий Игоревич';

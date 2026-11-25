@@ -20,8 +20,8 @@ const str = (v: unknown, field: string, max: number, need = false) => {
 async function campaignOf(q: Q, ctx: Ctx, id: string) {
   if (!isUuid(id)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
-  const c = (await q.query<{ id: string; owner_id: string | null; network_id: string; stage: string; title: string; network: string }>(
-    `select c.id, c.owner_id, c.network_id, c.stage, c.title, n.name network from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+  const c = (await q.query<{ id: string; owner_id: string | null; last_owner_id: string | null; network_id: string; stage: string; title: string; network: string }>(
+    `select c.id, c.owner_id, c.last_owner_id, c.network_id, c.stage, c.title, n.name network from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
       where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, id, ...vis.params])).rows[0];
   if (!c) throw notFound();
   return c;
@@ -108,13 +108,13 @@ export async function listActivities(ctx: Ctx, campaignId: string) {
        from kam.activity a left join kam.network_contact nc on nc.client_id = a.client_id and nc.id = a.contact_id
        join kam.employee_profile cb on cb.client_id = a.client_id and cb.id = a.created_by left join kam.employee_profile db on db.client_id = a.client_id and db.id = a.done_by
       where a.client_id=$1 and a.campaign_id=$2 order by (a.status = 'PLANNED') desc, a.at desc`, [ctx.clientId, campaignId]);
-  return { items: rows, can_edit: canEditFor(ctx, c.owner_id) && !['CANCELLED', 'CLOSED'].includes(c.stage) };
+  return { items: rows, can_edit: canEditFor(ctx, c.owner_id, c.last_owner_id) && !['CANCELLED', 'CLOSED'].includes(c.stage) };
 }
 
 export async function saveActivity(tx: Tx, ctx: Ctx, campaignId: string, id: string | null, b: Record<string, unknown>): Promise<CommandResult> {
   await lockCampaignRecord(tx, ctx.clientId, campaignId);
   const c = await campaignOf(tx, ctx, campaignId);
-  if (!canEditFor(ctx, c.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, c.owner_id, c.last_owner_id)) throw forbidden();
   if (['CANCELLED', 'CLOSED'].includes(c.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Кампания отменена или закрыта.');
   let before: { status: string } | undefined;
   if (id) {

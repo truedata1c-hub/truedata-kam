@@ -159,3 +159,12 @@ test('портфель: фильтры, просрочка, количество
   assert.deepEqual(refs.networks.map((n: any) => n.name).sort(), ['АСНА', 'Мелодия здоровья', 'Ригла']);
   assert.equal(refs.assignable.length, 1);
 });
+
+test('часовой пояс модуля: «сегодня» и даты в базе — по Москве, а не по UTC сервера', async () => {
+  const { todayIso, APP_TZ } = await import('../src/time.js');
+  assert.equal(APP_TZ, 'Europe/Moscow');
+  assert.equal(todayIso(new Date('2026-11-20T22:30:00Z')), '2026-11-21'); // 01:30 по Москве — уже следующий день
+  assert.equal(todayIso(new Date('2026-11-20T20:59:00Z')), '2026-11-20');
+  const tz = (await env.db.query<{ tz: string }>("select current_setting('TimeZone') tz")).rows[0]!.tz;
+  assert.equal(tz, 'Europe/Moscow');
+});

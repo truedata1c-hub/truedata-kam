@@ -70,6 +70,19 @@ test('сценарий 5: разбивка 3 бренда × 4 квартала 
   const badRes = (await env.app.inject({ method: 'POST', url: `${C(env)}/campaigns/${c.id}/versions/parse`, headers: { ...bad.headers, authorization: `Bearer ${env.tokens['anna.smirnova']}` }, payload: bad.payload })).json();
   assert.equal(badRes.issues.length, 2);
   assert.match(badRes.issues[1].message, /Неизвестный бренд/);
+
+  // Повтор строки бренда и формула без вычисленного значения — ошибки, а не тихая перезапись или ноль.
+  const wb2 = new ExcelJS.Workbook();
+  await wb2.xlsx.load(tpl.rawPayload as unknown as ArrayBuffer);
+  const ws2 = wb2.getWorksheet('Разбивка')!;
+  const firstBrand = ws2.getRow(3);
+  firstBrand.getCell(3).value = 5;
+  ws2.addRow([firstBrand.getCell(1).value, firstBrand.getCell(2).value, 7]);
+  ws2.getRow(4).getCell(3).value = { formula: 'D4*2' } as ExcelJS.CellFormulaValue;
+  const dupMp = multipart({}, { name: 't.xlsx', content: Buffer.from(await wb2.xlsx.writeBuffer()) });
+  const dup = (await env.app.inject({ method: 'POST', url: `${C(env)}/campaigns/${c.id}/versions/parse`, headers: { ...dupMp.headers, authorization: `Bearer ${env.tokens['anna.smirnova']}` }, payload: dupMp.payload })).json();
+  assert.ok(dup.issues.some((i: any) => /уже указан в строке 3/.test(i.message)), JSON.stringify(dup.issues));
+  assert.ok(dup.issues.some((i: any) => i.row === 4 && /Формула без вычисленного значения/.test(i.message)), JSON.stringify(dup.issues));
 });
 
 test('проверки разбивки: пусто, чужой период, отрицательная сумма; бренд без сумм отбрасывается', async () => {
@@ -102,9 +115,9 @@ test('версии неизменяемы, номера растут, устар
   // Чужой КАМ кампанию не видит; финансовый директор видит, но версию не создаёт.
   assert.equal((await call(`${C(env)}/campaigns/${c.id}/versions`, { as: 'ilya.ivanov', ifMatch: v2.etag, body: body(1) })).status, 404);
   assert.equal((await call(`${C(env)}/campaigns/${c.id}/versions`, { as: 'igor.vasiliev', ifMatch: v2.etag, body: body(1) })).status, 403);
-  const inApproval = await one<{ id: string; revision: number }>("select id, revision from kam.campaign where stage='APPROVAL' and owner_id=(select id from kam.app_user where email='maria.kuznetsova@demo.test') limit 1");
+  const inApproval = await one<{ id: string; revision: number }>("select id, revision from kam.campaign_with_owner where stage='APPROVAL' and owner_id=(select id from kam.app_user where email='maria.kuznetsova@demo.test') limit 1");
   if (inApproval) {
-    const r = await call(`${C(env)}/campaigns/${inApproval.id}/versions`, { as: 'maria.kuznetsova', ifMatch: `"campaign:${inApproval.id}:${inApproval.revision}"`, body: body(1) });
+    const r = await call(`${C(env)}/campaigns/${inApproval.id}/versions`, { as: 'maria.kuznetsova', ifMatch: (await call(`${C(env)}/campaigns/${inApproval.id}`, { as: 'maria.kuznetsova' })).etag!, body: body(1) });
     assert.equal(r.json.error.code, 'STAGE_LOCKED');
   }
 });

@@ -33,7 +33,7 @@
       <div class="kpi">
         <div class="kpiLabel">План инвестиций</div>
         <div class="kpiValue">{{ fmtShort(kpi.investment) }}</div>
-        <div class="kpiSub">по текущим версиям {{ kpi.with_versions }} {{ plural(kpi.with_versions, 'кампании', 'кампаний', 'кампаний') }}</div>
+        <div class="kpiSub">полные суммы текущих версий {{ kpi.with_versions }} {{ plural(kpi.with_versions, 'кампании', 'кампаний', 'кампаний') }}<q-tooltip>Сумма каждой кампании целиком, включая месяцы других лет. В «Аналитике» — только часть, приходящаяся на выбранный год.</q-tooltip></div>
       </div>
       <div class="kpi">
         <div class="kpiLabel">Ожидаемый оборот · ROI</div>

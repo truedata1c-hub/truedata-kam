@@ -9,6 +9,7 @@ import { invalid } from './errors.js';
 import { type Ctx, requirePermission } from './access.js';
 import { type CommandResult, audit, isUuid, lockCampaignRecord } from './commands.js';
 import { readSettings, writeSetting } from './settings.js';
+import { openSecret, sealSecret } from './secrets.js';
 
 type Q = Pick<Tx, 'query'>;
 
@@ -31,9 +32,19 @@ export interface NotifyInput { kind: Kind; users: (string | null | undefined)[];
 
 export interface SmtpSettings { host: string; port: number; secure: boolean; user: string; password: string; from: string }
 
+/** Срок актуальности письма, накопленного без почтового канала: старше — не отправляется задним числом. */
+export const BACKLOG_HOURS = 72;
+
+/** Настроенный канал с расшифрованным паролем. Пароль зашифрован другим ключом или без ключа — канал считается ненастроенным. */
 async function smtpOf(q: Q, clientId: string): Promise<SmtpSettings | null> {
   const s = (await readSettings(q, clientId)).smtp as SmtpSettings | undefined;
-  return s?.host && s.from ? s : null;
+  if (!s?.host || !s.from) return null;
+  const password = openSecret(s.password ?? '');
+  if (password === null) {
+    console.error(`smtp: пароль клиента ${clientId} зашифрован, но SETTINGS_KEY не задан или не подходит — письма ждут`);
+    return null;
+  }
+  return { ...s, password };
 }
 
 const appUrl = () => (process.env.APP_URL ?? '').replace(/\/$/, '');
@@ -139,13 +150,19 @@ export async function saveMailSettings(tx: Tx, ctx: Ctx, b: Record<string, unkno
   if (!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(from) && !/^.{1,100} <[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+>$/.test(from)) throw invalid('from', 'Укажите адрес отправителя, например kam@company.ru.');
   const user = typeof b.user === 'string' ? b.user.trim().slice(0, 200) : '';
   // Пароль не возвращается в интерфейс; пустое поле при сохранении оставляет прежний.
-  const password = typeof b.password === 'string' && b.password ? b.password.slice(0, 500) : before?.password ?? '';
+  // Новый пароль шифруется ключом стенда (если задан); пустое поле оставляет сохранённое значение как есть.
+  const password = typeof b.password === 'string' && b.password ? sealSecret(b.password.slice(0, 500)) : before?.password ?? '';
   const s: SmtpSettings = { host, port, secure: Boolean(b.secure), user, password, from };
   await writeSetting(tx, ctx.clientId, 'smtp', s);
-  // Накопленные письма уходят в отправку.
-  const queued = await tx.query("update kam.email_outbox set status='QUEUED', next_attempt_at=now() where client_id=$1 and status='NO_CHANNEL'", [ctx.clientId]);
+  // Накопленные письма уходят в отправку, только если они ещё актуальны; старые помечаются устаревшими
+  // (их можно отправить вручную из журнала писем), чтобы подключение почты не обрушило поток прошлых напоминаний.
+  const { rows: [r] } = await tx.query<{ released: number; expired: number }>(
+    `with u as (
+       update kam.email_outbox set status = case when created_at > now() - make_interval(hours => $2) then 'QUEUED' else 'EXPIRED' end, next_attempt_at = now()
+        where client_id=$1 and status='NO_CHANNEL' returning status)
+     select count(*) filter (where status='QUEUED')::int released, count(*) filter (where status='EXPIRED')::int expired from u`, [ctx.clientId, BACKLOG_HOURS]);
   await audit(tx, ctx, { entityType: 'settings', action: 'UPDATE', after: { smtp: { host, port, secure: s.secure, user, from } } });
-  return { status: 200, body: { configured: true, released: queued.rowCount } };
+  return { status: 200, body: { configured: true, released: r!.released, expired: r!.expired } };
 }
 
 // Отправка ---------------------------------------------------------------------------
@@ -200,7 +217,7 @@ export async function retryEmail(tx: Tx, ctx: Ctx, id: string): Promise<CommandR
   requirePermission(ctx, 'ADMIN');
   if (!isUuid(id)) throw invalid('id', 'Некорректное письмо.');
   const channel = await smtpOf(tx, ctx.clientId);
-  const r = await tx.query(`update kam.email_outbox set status=$3, next_attempt_at=now(), attempts = 0 where client_id=$1 and id=$2 and status in ('FAILED','RETRY','NO_CHANNEL')`,
+  const r = await tx.query(`update kam.email_outbox set status=$3, next_attempt_at=now(), attempts = 0 where client_id=$1 and id=$2 and status in ('FAILED','RETRY','NO_CHANNEL','EXPIRED')`,
     [ctx.clientId, id, channel ? 'QUEUED' : 'NO_CHANNEL']);
   return { status: 200, body: { updated: r.rowCount } };
 }

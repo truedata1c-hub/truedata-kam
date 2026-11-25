@@ -246,3 +246,35 @@ test('демо-набор: идущие согласования с исполн
   const bad = await one<{ n: number }>(`select count(*)::int n from kam.campaign c where c.stage='APPROVAL' and not exists (select 1 from kam.approval a where a.campaign_id=c.id and a.status='IN_PROGRESS')`);
   assert.equal(bad.n, 0);
 });
+
+test('замещение передаёт право решать любому сотруднику; снятое право исполнителя снимает его и с заместителя', async () => {
+  const cid = await campaignWithVersion('anna.smirnova', 'АСНА', 'Годовые условия', 1_000_000);
+  assert.equal((await submit('anna.smirnova', cid)).status, 201);
+  // Руководитель КАМ Елена на время отпуска поручает подтверждать заявки КАМ Дмитрию (у него нет права «Согласовывать»).
+  const dmitry = await userId('dmitry.petrov');
+  const sub = await call(`${C(env)}/substitutions`, { as: 'elena.sokolova', body: { deputy_id: dmitry, from: '2026-01-01', to: '2030-12-31', comment: 'Отпуск' } });
+  assert.equal(sub.status, 201, sub.body);
+  assert.equal((await call(`${C(env)}/my-decisions/count`, { as: 'dmitry.petrov' })).json.pending >= 1, true);
+  assert.equal((await approvalOf('dmitry.petrov', cid)).my_decision.for_user, 'Елена Соколова');
+
+  const elena = await userId('elena.sokolova');
+  const users = (await call(`${C(env)}/users`, { as: 'admin' })).json.items;
+  const roles = users.find((u: any) => u.id === elena).role_ids;
+  const kamRole = await id('business_role', 'КАМ');
+  assert.equal((await call(`${C(env)}/users/${elena}`, { method: 'PATCH', as: 'admin', body: { role_ids: [kamRole] } })).status, 200);
+  try {
+    const r = await decide('elena.sokolova', cid, 'APPROVE');
+    assert.equal(r.status, 403, r.body);
+    assert.equal((await call(`${C(env)}/my-decisions/count`, { as: 'elena.sokolova' })).json.pending, 0);
+    assert.equal((await approvalOf('elena.sokolova', cid)).my_decision, null);
+    // Заместитель решает за Елену только пока у неё самой есть право.
+    assert.equal((await decide('dmitry.petrov', cid, 'APPROVE')).status, 403);
+    assert.equal((await call(`${C(env)}/my-decisions`, { as: 'dmitry.petrov' })).json.items.some((x: any) => x.campaign_id === cid), false);
+  } finally {
+    assert.equal((await call(`${C(env)}/users/${elena}`, { method: 'PATCH', as: 'admin', body: { role_ids: roles } })).status, 200);
+  }
+  const ok = await decide('dmitry.petrov', cid, 'APPROVE', 'За Елену');
+  assert.equal(ok.status, 200, ok.body);
+  const step = (await approvalOf('anna.smirnova', cid)).rounds[0].steps[0];
+  assert.deepEqual([step.decided_by_name, step.decided_for_name], ['Дмитрий Петров', 'Елена Соколова']);
+});

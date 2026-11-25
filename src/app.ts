@@ -95,6 +95,14 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
 
   app.addHook('onRequest', async (req) => {
     if (!req.url.startsWith('/api/')) return;
+    // Защита от межсайтовых запросов: при входе по cookie изменяющий запрос обязан нести служебный заголовок,
+    // который браузер не добавит к запросу с чужой страницы (поддомены *.truedata.tech для cookie — «тот же сайт»).
+    // Интерфейс модуля передаёт Idempotency-Key в каждом изменяющем запросе, включая загрузку файлов.
+    const unsafe = !['GET', 'HEAD', 'OPTIONS'].includes(req.method);
+    const viaCookie = !req.headers.authorization?.startsWith('Bearer ') && Boolean(req.cookies[COOKIE]);
+    if (unsafe && viaCookie && !req.headers['idempotency-key'] && !req.url.startsWith(`${BASE}/auth/login`)) {
+      throw new ApiError(403, 'CSRF_HEADER_REQUIRED', 'Запрос отклонён: нет служебного заголовка. Обновите страницу и повторите.');
+    }
     req.principal = await principalFromToken(opts.db, tokenOf(req), (req.params as { clientId?: string }).clientId);
     if (req.principal?.mustChangePassword && req.method !== 'GET' && !req.url.startsWith(`${BASE}/me/password`) && !req.url.startsWith(`${BASE}/auth/`)) {
       throw new ApiError(403, 'PASSWORD_CHANGE_REQUIRED', 'Смените временный пароль, чтобы продолжить работу.');
@@ -210,6 +218,7 @@ export async function buildApp(opts: AppOptions): Promise<FastifyInstance> {
     return r.data;
   });
   app.patch(`${C}/campaigns/:id`, command((tx, ctx, req) => campaigns.updateCampaign(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
+  app.get(`${C}/campaigns/:id/final-snapshot`, async (req) => campaigns.finalSnapshot(await ctxOf(req), param(req, 'id')));
   app.post(`${C}/campaigns/:id/transitions`, command((tx, ctx, req) => campaigns.transition(tx, ctx, param(req, 'id'), ifMatch(req), body(req))));
 
   // Версии предложения

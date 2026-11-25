@@ -174,3 +174,48 @@ test('если согласующий принял сеть, его шаг не�
     assert.equal((await call(url + '/approval/decision', { as, ifMatch: card.etag, body: { decision: 'APPROVE' } })).status, 403);
   }
 });
+
+test('свободная сеть остаётся у руководителя прежнего КАМа; форма, открытая до передачи, устаревает', async () => {
+  const base = C(env);
+  const net = await holder('Ригла');
+  const kam = net.user_id;
+  const kamLogin = (await env.db.query('select email from kam.app_user where id=$1', [kam])).rows[0].email.split('@')[0];
+  const mgrId = (await env.db.query('select manager_id from kam.user_manager where client_id=$1 and user_id=$2 and valid @> current_date', [env.demo, kam])).rows[0].manager_id;
+  const mgr = (await env.db.query('select email from kam.app_user where id=$1', [mgrId])).rows[0].email.split('@')[0];
+  const ref = (await call(base + '/reference', { as: kamLogin })).json;
+  const created = await call(base + '/campaigns', { as: kamLogin, body: { network_id: net.network_id, type_id: ref.types.find((t: { name: string }) => t.name === 'Ассортиментное соглашение').id,
+    title: 'Проверка свободной сети', period_from: '2027-01-01', period_to: '2027-06-30' } });
+  assert.equal(created.status, 201, created.body);
+  const url = base + '/campaigns/' + created.json.id;
+  const started = await call(url + '/transitions', { as: kamLogin, ifMatch: created.etag, body: { action: 'START_NEGOTIATION' } });
+  const draft = (await call(url + '/versions/draft', { as: kamLogin })).json;
+  const v = await call(url + '/versions', { as: kamLogin, ifMatch: started.etag, body: { justification: 'Рост', cells: [
+    { brand_id: ref.brands[0].id, period_key: draft.periods[0].key, investment: 900, turnover: 9000 }] } });
+  const sent = await call(url + '/approval/submit', { as: kamLogin, ifMatch: v.etag, body: {} });
+  assert.equal(sent.status, 201, sent.body);
+  const staleEtag = sent.etag!;
+
+  assert.equal((await call(base + '/assignments/' + net.id + '/end', { as: 'admin', body: {} })).status, 200);
+  // Прежний КАМ карточку больше не видит, руководитель — видит и может отозвать отправку.
+  assert.equal((await call(url, { as: kamLogin })).status, 404);
+  const card = await call(url, { as: mgr });
+  assert.equal(card.status, 200);
+  assert.equal(card.json.owner.name, 'КАМ не назначен');
+  assert.ok(card.json.actions.includes('CANCEL'));
+  const list = (await call(base + '/campaigns', { as: mgr, query: { network: net.network_id } })).json;
+  assert.ok(list.items.some((c: { id: string }) => c.id === created.json.id));
+  // Итоги портфеля считаются по тем же кампаниям, что и строки таблицы.
+  assert.equal(list.kpi.total, list.items.length);
+  const kamList = (await call(base + '/campaigns', { as: kamLogin, query: { network: net.network_id } })).json;
+  assert.deepEqual([kamList.items.length, kamList.kpi.total, kamList.kpi.investment], [0, 0, 0]);
+  // Форма, открытая до передачи, не проходит: сменился ответственный.
+  const old = await call(url + '/approval/withdraw', { as: mgr, ifMatch: staleEtag, body: {} });
+  assert.equal(old.status, 412);
+  assert.equal(old.json.error.details.owner_changed, true);
+  const w = await call(url + '/approval/withdraw', { as: mgr, ifMatch: card.etag, body: { comment: 'Сеть передаётся' } });
+  assert.equal(w.status, 200, w.body);
+  assert.equal(w.json.stage, 'NEGOTIATION');
+  // КАМ без права вести кампании подчинённых свободную сеть не получает.
+  const peer = (await env.db.query("select email from kam.app_user where email like 'ilya.ivanov%'")).rows[0].email.split('@')[0];
+  assert.equal((await call(url, { as: peer })).status, 404);
+});

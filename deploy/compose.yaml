@@ -49,6 +49,9 @@ services:
       KAM_DEMO_PASSWORD: ${KAM_DEMO_PASSWORD:-}
       DEMO_AUTO_UPGRADE: ${DEMO_AUTO_UPGRADE:-1}
       BACKUP_DIR: /data/backups
+      # Ключ шифрования пароля SMTP в базе (openssl rand -base64 32); без него пароль хранится открытым текстом.
+      SETTINGS_KEY: ${SETTINGS_KEY:-}
+      APP_TIMEZONE: ${APP_TIMEZONE:-Europe/Moscow}
     volumes:
       - type: bind
         source: ${KAM_DATA_DIR:-/srv/truedata-mdm/kam}/files

@@ -27,8 +27,8 @@ const today = async (q: Q) => (await q.query<{ d: string }>('select current_date
 async function visibleCampaign(q: Q, ctx: Ctx, id: string) {
   if (!isUuid(id)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
-  const c = (await q.query<{ id: string; stage: string; owner_id: string | null; revision: number }>(
-    `select c.id, c.stage, c.owner_id, c.revision from kam.campaign_with_owner c where c.client_id=$1 and c.id=$2 and ${vis.sql}`,
+  const c = (await q.query<{ id: string; stage: string; owner_id: string | null; last_owner_id: string | null; revision: number }>(
+    `select c.id, c.stage, c.owner_id, c.last_owner_id, c.revision from kam.campaign_with_owner c where c.client_id=$1 and c.id=$2 and ${vis.sql}`,
     [ctx.clientId, id, ...vis.params])).rows[0];
   if (!c) throw notFound();
   return c;
@@ -67,8 +67,8 @@ export async function closeApproval(tx: Tx, clientId: string, campaignId: string
 // Уведомления ----------------------------------------------------------------------
 
 async function campaignLabel(q: Q, clientId: string, id: string) {
-  const r = (await q.query<{ title: string; network: string; owner_id: string | null }>(
-    'select c.title, n.name network, c.owner_id from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2', [clientId, id])).rows[0]!;
+  const r = (await q.query<{ title: string; network: string; owner_id: string | null; last_owner_id: string | null }>(
+    'select c.title, n.name network, c.owner_id, c.last_owner_id from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2', [clientId, id])).rows[0]!;
   return { ...r, label: `${r.network} — ${r.title}` };
 }
 
@@ -99,7 +99,7 @@ export async function notifyVersionChanged(q: Q, ctx: Ctx, campaignId: string, n
 export async function submit(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: string | undefined, b: Record<string, unknown>): Promise<CommandResult> {
   const locked = await lockCampaign(tx, ctx, campaignId, ifMatch);
   await visibleCampaign(tx, ctx, campaignId);
-  if (!canEditFor(ctx, locked.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, locked.owner_id, locked.last_owner_id)) throw forbidden();
   if (locked.stage !== 'NEGOTIATION') throw new ApiError(409, 'TRANSITION_NOT_ALLOWED', 'Отправить на согласование можно с этапа «Переговоры с сетью».', { stage: locked.stage });
   const comment = typeof b.comment === 'string' ? b.comment.trim() : '';
   if (comment.length > 2000) throw invalid('comment', 'Не длиннее 2000 символов.');
@@ -143,13 +143,13 @@ export async function submit(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
   if (done) await campaignEvent(tx, ctx, campaignId, 'STAGE', { from: 'APPROVAL', to: 'APPROVED', comment: 'Все шаги маршрута пропущены по условиям.' });
   const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'approval', entityId: approvalId, action: 'SUBMIT', after: { campaign_id: campaignId, round, version: v.number, template: route.template.name, steps: route.steps.map((s) => ({ title: s.title, included: s.included, candidates: s.candidates.map((x) => x.name) })) } });
-  return { status: 201, body: { id: approvalId, round, stage: to, revision: rev }, etag: campaignEtag(campaignId, rev) };
+  return { status: 201, body: { id: approvalId, round, stage: to, revision: rev }, etag: campaignEtag(campaignId, rev, locked.owner_id) };
 }
 
 export async function withdraw(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: string | undefined, b: Record<string, unknown>): Promise<CommandResult> {
   const locked = await lockCampaign(tx, ctx, campaignId, ifMatch);
   await visibleCampaign(tx, ctx, campaignId);
-  if (!canEditFor(ctx, locked.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, locked.owner_id, locked.last_owner_id)) throw forbidden();
   const comment = typeof b.comment === 'string' ? b.comment.trim() : '';
   if (comment.length > 2000) throw invalid('comment', 'Не длиннее 2000 символов.');
   const a = locked.stage === 'APPROVAL' ? await activeApproval(tx, ctx.clientId, campaignId) : undefined;
@@ -161,19 +161,34 @@ export async function withdraw(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: st
   await setStage(tx, ctx, campaignId, 'APPROVAL', 'NEGOTIATION', null);
   const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'approval', entityId: a.id, action: 'WITHDRAW', reason: comment || null });
-  return { status: 200, body: { stage: 'NEGOTIATION', revision: rev }, etag: campaignEtag(campaignId, rev) };
+  return { status: 200, body: { stage: 'NEGOTIATION', revision: rev }, etag: campaignEtag(campaignId, rev, locked.owner_id) };
 }
 
 // Решения ----------------------------------------------------------------------
 
-/** За кого пользователь может решить шаг: сам или как заместитель кандидата на сегодня. */
-async function decisionRight(q: Q, ctx: Ctx, candidates: string[], owner: string | null): Promise<{ ok: boolean; forUser: string | null }> {
+/** SQL-условие: у сотрудника (выражение `user`) сейчас есть действующая роль с правом «Согласовывать» в клиенте `client`. */
+const hasApprove = (user: string, client: string) =>
+  `exists (select 1 from kam.user_business_role ur join kam.business_role r on r.client_id = ur.client_id and r.id = ur.role_id and not r.archived
+            join kam.membership m on m.client_id = ur.client_id and m.user_id = ur.user_id and m.active
+           where ur.client_id = ${client} and ur.user_id = ${user} and 'APPROVE' = any(r.permissions))`;
+
+/**
+ * За кого пользователь может решить шаг: сам или как заместитель кандидата на сегодня.
+ * Исполнители шага замораживаются при отправке, но право «Согласовывать» проверяется в момент решения:
+ * у исполнителя — его собственное, у заместителя — право того, кого он замещает (замещение передаёт право
+ * на свои даты, заместителем может быть любой сотрудник). Снятая у исполнителя роль снимает право и с его заместителя.
+ * Действующий КАМ сети (`owner`) не решает шаги своей кампании, даже если стал им после отправки, и не передаёт это право заместителю.
+ */
+async function decisionRight(q: Q, ctx: Ctx, candidates: string[], owner: string | null): Promise<{ ok: boolean; forUser: string | null; noRight?: boolean }> {
   const eligible = candidates.filter((id) => id !== owner);
-  if (eligible.includes(ctx.principal.userId)) return { ok: true, forUser: null };
+  const self = eligible.includes(ctx.principal.userId);
+  if (self && ctx.access.permissions.has('APPROVE')) return { ok: true, forUser: null };
   const { rows } = await q.query<{ user_id: string }>(
-    `select user_id from kam.substitution where client_id=$1 and deputy_id=$2 and valid @> current_date and user_id = any($3::uuid[]) order by user_id limit 1`,
+    `select sb.user_id from kam.substitution sb where sb.client_id=$1 and sb.deputy_id=$2 and sb.valid @> current_date and sb.user_id = any($3::uuid[])
+        and ${hasApprove('sb.user_id', 'sb.client_id')} order by sb.user_id limit 1`,
     [ctx.clientId, ctx.principal.userId, eligible]);
-  return rows[0] ? { ok: true, forUser: rows[0].user_id } : { ok: false, forUser: null };
+  if (rows[0]) return { ok: true, forUser: rows[0].user_id };
+  return { ok: false, forUser: null, noRight: self };
 }
 
 export async function decide(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: string | undefined, b: Record<string, unknown>): Promise<CommandResult> {
@@ -191,6 +206,7 @@ export async function decide(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
   if (!step || (b.step_id !== undefined && b.step_id !== step.id)) throw new ApiError(409, 'STEP_NOT_ACTIVE', 'Этот шаг уже решён. Обновите карточку.');
   if (ctx.principal.userId === a.submitted_by || ctx.principal.userId === locked.owner_id) throw new ApiError(403, 'SELF_APPROVAL', 'Нельзя согласовывать собственную кампанию.');
   const right = await decisionRight(tx, ctx, step.candidates, locked.owner_id);
+  if (!right.ok && right.noRight) throw forbidden('В вашей роли нет права «Согласовывать».');
   if (!right.ok) throw forbidden('Вы не исполнитель этого шага и не замещаете его исполнителя.');
   await tx.query(
     `update kam.approval_step set status=$3, decided_by=$4, decided_for=$5, decision_comment=$6, decided_at=now() where client_id=$1 and id=$2`,
@@ -231,7 +247,7 @@ export async function decide(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
   }
   const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'approval', entityId: a.id, action: decision, reason: comment || null, after: { step: step.position, title: step.title, for_user: right.forUser } });
-  return { status: 200, body: { stage, revision: rev }, etag: campaignEtag(campaignId, rev) };
+  return { status: 200, body: { stage, revision: rev }, etag: campaignEtag(campaignId, rev, locked.owner_id) };
 }
 
 // Новая версия после «Согласовано внутри» -------------------------------------------
@@ -289,7 +305,7 @@ export async function getApproval(ctx: Ctx, campaignId: string) {
       }
     }
   }
-  const edit = canEditFor(ctx, c.owner_id);
+  const edit = canEditFor(ctx, c.owner_id, c.last_owner_id);
   const canWithdraw = Boolean(current && edit && !current.steps.some((s: { status: string }) => s.status === 'APPROVED'));
   // Предпросмотр маршрута до отправки: КАМ видит, к кому уйдёт кампания.
   let preview = null;
@@ -315,14 +331,18 @@ export async function getApproval(ctx: Ctx, campaignId: string) {
   return { rounds: byRound, current, my_decision: my, can_withdraw: canWithdraw, preview };
 }
 
+/**
+ * Шаг s ждёт решения пользователя $2: сам (если $3 — у него есть право «Согласовывать») или как заместитель исполнителя с этим правом.
+ * Автор отправки и действующий КАМ сети не решают шаги своей кампании (см. decisionRight).
+ */
 const pendingForUser = `s.status = 'ACTIVE' and a.submitted_by <> $2 and c.owner_id is distinct from $2
-  and (s.candidates @> array[$2::uuid] or exists (select 1 from kam.substitution sb
+  and (($3::boolean and s.candidates @> array[$2::uuid]) or exists (select 1 from kam.substitution sb
        where sb.client_id = s.client_id and sb.deputy_id = $2 and sb.valid @> current_date
-         and sb.user_id is distinct from c.owner_id and sb.user_id = any(s.candidates)))`;
+         and sb.user_id is distinct from c.owner_id and sb.user_id = any(s.candidates) and ${hasApprove('sb.user_id', 'sb.client_id')}))`;
 
 export async function myDecisions(ctx: Ctx, status: string | undefined) {
   const done = status === 'done';
-  const params: unknown[] = [ctx.clientId, ctx.principal.userId];
+  const params: unknown[] = done ? [ctx.clientId, ctx.principal.userId] : [ctx.clientId, ctx.principal.userId, ctx.access.permissions.has('APPROVE')];
   const who = done ? 's.decided_by = $2' : pendingForUser;
   const { rows } = await ctx.db.query(
     `select s.id step_id, s.title step_title, s.position, s.status, s.activated_at, s.due_date::text due_date, s.decided_at, s.decision_comment,
@@ -354,7 +374,7 @@ export async function pendingCount(ctx: Ctx): Promise<number> {
   const { rows } = await ctx.db.query<{ n: number }>(
     `select count(*)::int n from kam.approval_step s join kam.approval a on a.client_id = s.client_id and a.id = s.approval_id
        join kam.campaign_with_owner c on c.client_id = s.client_id and c.id = s.campaign_id
-      where s.client_id=$1 and ${pendingForUser}`, [ctx.clientId, ctx.principal.userId]);
+      where s.client_id=$1 and ${pendingForUser}`, [ctx.clientId, ctx.principal.userId, ctx.access.permissions.has('APPROVE')]);
   return rows[0]!.n;
 }
 
@@ -384,6 +404,8 @@ export async function createSubstitution(tx: Tx, ctx: Ctx, b: Record<string, unk
   if (b.deputy_id === userId) throw invalid('deputy_id', 'Заместитель — другой сотрудник.');
   const active = (await tx.query("select 1 from kam.membership m join kam.app_user u on u.id = m.user_id and not u.disabled where m.client_id=$1 and m.user_id=$2 and m.active", [ctx.clientId, b.deputy_id])).rowCount;
   if (!active) throw invalid('deputy_id', 'Заместитель не найден или отключён.');
+  // Заместителем может быть любой сотрудник клиента: замещение передаёт ему право решать шаги замещаемого на эти даты
+  // (например, руководитель КАМ на время отпуска поручает подтверждать заявки своему КАМ). Решение Сергея 20.11.2026.
   const from = b.from, to = b.to;
   if (typeof from !== 'string' || !DATE.test(from)) throw invalid('from', 'Укажите дату начала.');
   if (typeof to !== 'string' || !DATE.test(to)) throw invalid('to', 'Укажите дату окончания.');
