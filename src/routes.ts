@@ -164,7 +164,7 @@ function conditionText(c: Condition, d: Dir): string {
 
 // Вычисление маршрута -------------------------------------------------------------
 
-export interface RouteCampaign { id: string; owner_id: string | null; network_id: string; type_id: string; group_id: string | null; period_from: string; period_to: string }
+export interface RouteCampaign { id: string; owner_id: string | null; last_owner_id?: string | null; network_id: string; type_id: string; group_id: string | null; period_from: string; period_to: string }
 
 export interface ResolvedStep {
   position: number; title: string; assignee_rule: string; condition_text: string; deadline_days: number;
@@ -196,9 +196,10 @@ function evaluate(c: Condition, m: VersionMetrics | null, camp: RouteCampaign, d
 }
 
 /** Видит ли пользователь кампанию по своей роли (уточнение «с доступом к сети»). */
-export function canSee(u: Approver, camp: Pick<RouteCampaign, 'owner_id'>, d: Dir): boolean {
+export function canSee(u: Approver, camp: Pick<RouteCampaign, 'owner_id' | 'last_owner_id'>, d: Dir): boolean {
   if (u.scopes.has('ALL') || u.scopes.has('BRANDS')) return true;
-  if (!camp.owner_id) return false;
+  const owner = camp.owner_id ?? camp.last_owner_id ?? null;
+  if (!owner || (!camp.owner_id && owner === u.id)) return false;
   const team = new Set<string>([u.id]);
   if (u.scopes.has('SUBORDINATES')) {
     let grew = true;
@@ -207,7 +208,7 @@ export function canSee(u: Approver, camp: Pick<RouteCampaign, 'owner_id'>, d: Di
       for (const [sub, mgr] of d.managerOf) if (team.has(mgr) && !team.has(sub)) { team.add(sub); grew = true; }
     }
   }
-  return team.has(camp.owner_id);
+  return team.has(owner);
 }
 
 export function resolveSteps(steps: StepDef[], camp: RouteCampaign, m: VersionMetrics | null, submitterId: string, d: Dir): ResolvedStep[] {
@@ -233,7 +234,9 @@ export function resolveSteps(steps: StepDef[], camp: RouteCampaign, m: VersionMe
     let error: string | null = null;
     const a = s.assignee;
     if (a.kind === 'MANAGER') {
-      const chain = camp.owner_id ? chainOf(camp.owner_id) : [];
+      // Пока сеть свободна, цепочка руководителей строится от последнего КАМа сети.
+      const chainStart = camp.owner_id ?? camp.last_owner_id ?? null;
+      const chain = chainStart ? chainOf(chainStart) : [];
       const target = chain[a.level - 1];
       if (!target) error = a.level === 1 ? 'У ответственного не указан руководитель.' : `У ответственного нет руководителя уровня ${a.level}.`;
       else {
@@ -291,7 +294,7 @@ export async function selectTemplate(q: Q, clientId: string, camp: Pick<RouteCam
 
 export async function routeCampaign(q: Q, clientId: string, campaignId: string): Promise<RouteCampaign> {
   const c = (await q.query<RouteCampaign>(
-    `select c.id, c.owner_id, c.network_id, c.type_id, n.group_id, c.period_from::text period_from, c.period_to::text period_to
+    `select c.id, c.owner_id, c.last_owner_id, c.network_id, c.type_id, n.group_id, c.period_from::text period_from, c.period_to::text period_to
        from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2`, [clientId, campaignId])).rows[0];
   if (!c) throw notFound();
   return c;
@@ -414,17 +417,18 @@ export async function previewTemplate(ctx: Ctx, b: Record<string, unknown>) {
   requirePermission(ctx, 'ADMIN');
   if (!isUuid(b.campaign_id)) throw required('campaign_id', 'Выберите кампанию.');
   const vis = campaignVisibility(ctx, 3);
-  const c = (await ctx.db.query<{ owner_id: string | null; title: string; network: string }>(
-    `select c.owner_id, c.title, n.name network from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+  const c = (await ctx.db.query<{ owner_id: string | null; last_owner_id: string | null; title: string; network: string }>(
+    `select c.owner_id, c.last_owner_id, c.title, n.name network from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
       where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, b.campaign_id, ...vis.params])).rows[0];
   if (!c) throw notFound();
-  if (!c.owner_id) throw new ApiError(422, 'NETWORK_NOT_ASSIGNED', 'Сначала закрепите аптечную сеть за КАМом.');
+  const author = c.owner_id ?? c.last_owner_id;
+  if (!author) throw new ApiError(422, 'NETWORK_NOT_ASSIGNED', 'Сначала закрепите аптечную сеть за КАМом.');
   const v = (await ctx.db.query<{ id: string }>('select id from kam.offer_version where client_id=$1 and campaign_id=$2 order by number desc limit 1', [ctx.clientId, b.campaign_id])).rows[0];
   let template: (TemplateRow & { rule?: string }) | undefined;
   if (b.steps !== undefined) {
     template = { id: '', name: typeof b.name === 'string' ? b.name : 'Новый шаблон', steps: await normalizeSteps(ctx.db, ctx.clientId, b.steps), tolerance_investment_pct: 0, tolerance_turnover_pct: 0, rule: 'предпросмотр' };
   }
-  const r = await computeRoute(ctx.db, ctx.clientId, b.campaign_id, v?.id ?? null, c.owner_id, template);
+  const r = await computeRoute(ctx.db, ctx.clientId, b.campaign_id, v?.id ?? null, author, template);
   return { campaign: { id: b.campaign_id, title: c.title, network: c.network }, has_version: Boolean(v), ...r };
 }
 

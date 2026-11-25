@@ -99,7 +99,7 @@ export async function listCampaigns(ctx: Ctx, q: ListQuery) {
     `select count(*)::int total, count(v.number) filter (where c.stage <> 'CANCELLED')::int n,
             coalesce(sum(v.total_investment) filter (where c.stage <> 'CANCELLED'), 0)::float8 investment,
             coalesce(sum(v.total_turnover) filter (where c.stage <> 'CANCELLED'), 0)::float8 turnover
-       from kam.campaign c
+       from kam.campaign_with_owner c
        left join lateral (select number, total_investment, total_turnover from kam.offer_version ov
                            where ov.client_id = c.client_id and ov.campaign_id = c.id order by number desc limit 1) v on true
        join kam.network n on n.client_id = c.client_id and n.id = c.network_id
@@ -134,11 +134,11 @@ async function loadVisible(ctx: Ctx, id: string, q: Pick<Tx, 'query'> = ctx.db) 
        join kam.employee_profile cb on cb.client_id = c.client_id and cb.id = c.created_by
       where c.client_id = $1 and c.id = $2 and ${vis.sql}`, [ctx.clientId, id, ...vis.params]);
   if (!rows[0]) throw notFound();
-  return rows[0] as Record<string, any> & { id: string; stage: Stage; owner_id: string | null; network_id: string; revision: number };
+  return rows[0] as Record<string, any> & { id: string; stage: Stage; owner_id: string | null; last_owner_id: string | null; network_id: string; revision: number };
 }
 
-function actionsFor(ctx: Ctx, c: { stage: Stage; owner_id: string | null }) {
-  const edit = canEditFor(ctx, c.owner_id);
+function actionsFor(ctx: Ctx, c: { stage: Stage; owner_id: string | null; last_owner_id: string | null }) {
+  const edit = canEditFor(ctx, c.owner_id, c.last_owner_id);
   const a: string[] = [];
   if (edit && EDITABLE_STAGES.includes(c.stage)) a.push('EDIT');
   if (edit && c.stage === 'PREPARATION') a.push('START_NEGOTIATION');
@@ -185,7 +185,7 @@ export async function getCampaign(ctx: Ctx, id: string) {
       confirmation: c.confirmation_document_id ? await docRef(ctx, c.confirmation_document_id, c.confirmed_at, c.confirmed_version_id) : null,
       final_terms: c.final_document_id ? await docRef(ctx, c.final_document_id, c.finalized_at, c.final_version_id) : null,
     },
-    etag: campaignEtag(c.id, c.revision),
+    etag: campaignEtag(c.id, c.revision, c.owner_id),
   };
 }
 
@@ -265,13 +265,13 @@ export async function createCampaign(tx: Tx, ctx: Ctx, b: Record<string, unknown
   }
   await campaignEvent(tx, ctx, id, 'CREATED', { to: 'PREPARATION' });
   await audit(tx, ctx, { entityType: 'campaign', entityId: id, action: 'CREATE', after: { title, network_id: b.network_id, type_id: b.type_id, period_from: from, period_to: to, control_date: control, owner_id: ownerId, legal_entity_ids: entities } });
-  return { status: 201, body: { id, number: last_no, warnings }, etag: campaignEtag(id, 1) };
+  return { status: 201, body: { id, number: last_no, warnings }, etag: campaignEtag(id, 1, ownerId) };
 }
 
 export async function updateCampaign(tx: Tx, ctx: Ctx, id: string, ifMatch: string | undefined, b: Record<string, unknown>): Promise<CommandResult> {
   const locked = await lockCampaign(tx, ctx, id, ifMatch);
   const before = await loadVisible(ctx, id, tx);
-  if (!canEditFor(ctx, before.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, before.owner_id, before.last_owner_id)) throw forbidden();
   checkSubmittedOwner(b.owner_id, before.owner_id);
   if (!EDITABLE_STAGES.includes(before.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Реквизиты меняются только на этапах подготовки и переговоров.');
   const next = {
@@ -305,7 +305,7 @@ export async function updateCampaign(tx: Tx, ctx: Ctx, id: string, ifMatch: stri
     before: { title: before.title, period_from: before.period_from, period_to: before.period_to, control_date: before.control_date },
     after: { ...next, ...(entities ? { legal_entity_ids: entities } : {}) } });
   const warnings = await overlaps(tx, ctx, { id, network_id: locked.network_id, type_id: before.type_id, period_from: next.period_from, period_to: next.period_to });
-  return { status: 200, body: { id, revision: rev, warnings }, etag: campaignEtag(id, rev) };
+  return { status: 200, body: { id, revision: rev, warnings }, etag: campaignEtag(id, rev, before.owner_id) };
 }
 
 const STAGE_DOCS: Record<string, { kinds: string[]; code: string; message: string }> = {
@@ -319,10 +319,10 @@ export async function transition(tx: Tx, ctx: Ctx, id: string, ifMatch: string |
   const action = b.action;
   const comment = typeof b.comment === 'string' ? b.comment.trim() : '';
   if (comment.length > 2000) throw invalid('comment', 'Не длиннее 2000 символов.');
-  const allowed = actionsFor(ctx, { stage: locked.stage as Stage, owner_id: locked.owner_id });
+  const allowed = actionsFor(ctx, { stage: locked.stage as Stage, owner_id: locked.owner_id, last_owner_id: locked.last_owner_id });
   if (typeof action !== 'string' || !['START_NEGOTIATION', 'CANCEL', 'CLOSE', 'CONFIRM', 'FINALIZE'].includes(action)) throw invalid('action', 'Неизвестное действие.');
   if (!allowed.includes(action)) {
-    if (!canEditFor(ctx, locked.owner_id)) throw forbidden();
+    if (!canEditFor(ctx, locked.owner_id, locked.last_owner_id)) throw forbidden();
     throw new ApiError(409, 'TRANSITION_NOT_ALLOWED', 'Это действие недоступно на текущем этапе.', { stage: locked.stage });
   }
   let to: Stage;
@@ -371,7 +371,7 @@ export async function transition(tx: Tx, ctx: Ctx, id: string, ifMatch: string |
       title: `Сеть подтвердила условия: ${names.network} — ${names.title}`, body: `Подтверждение: ${doc!.file_name}` });
   }
   await audit(tx, ctx, { entityType: 'campaign', entityId: id, action, before: { stage: locked.stage }, after: { stage: to }, reason: comment || null });
-  return { status: 200, body: { id, stage: to, revision: rev }, etag: campaignEtag(id, rev) };
+  return { status: 200, body: { id, stage: to, revision: rev }, etag: campaignEtag(id, rev, locked.owner_id) };
 }
 
 // Снимок финальных условий ------------------------------------------------------

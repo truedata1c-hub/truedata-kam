@@ -27,8 +27,8 @@ const today = async (q: Q) => (await q.query<{ d: string }>('select current_date
 async function visibleCampaign(q: Q, ctx: Ctx, id: string) {
   if (!isUuid(id)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
-  const c = (await q.query<{ id: string; stage: string; owner_id: string | null; revision: number }>(
-    `select c.id, c.stage, c.owner_id, c.revision from kam.campaign_with_owner c where c.client_id=$1 and c.id=$2 and ${vis.sql}`,
+  const c = (await q.query<{ id: string; stage: string; owner_id: string | null; last_owner_id: string | null; revision: number }>(
+    `select c.id, c.stage, c.owner_id, c.last_owner_id, c.revision from kam.campaign_with_owner c where c.client_id=$1 and c.id=$2 and ${vis.sql}`,
     [ctx.clientId, id, ...vis.params])).rows[0];
   if (!c) throw notFound();
   return c;
@@ -67,8 +67,8 @@ export async function closeApproval(tx: Tx, clientId: string, campaignId: string
 // Уведомления ----------------------------------------------------------------------
 
 async function campaignLabel(q: Q, clientId: string, id: string) {
-  const r = (await q.query<{ title: string; network: string; owner_id: string | null }>(
-    'select c.title, n.name network, c.owner_id from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2', [clientId, id])).rows[0]!;
+  const r = (await q.query<{ title: string; network: string; owner_id: string | null; last_owner_id: string | null }>(
+    'select c.title, n.name network, c.owner_id, c.last_owner_id from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2', [clientId, id])).rows[0]!;
   return { ...r, label: `${r.network} — ${r.title}` };
 }
 
@@ -99,7 +99,7 @@ export async function notifyVersionChanged(q: Q, ctx: Ctx, campaignId: string, n
 export async function submit(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: string | undefined, b: Record<string, unknown>): Promise<CommandResult> {
   const locked = await lockCampaign(tx, ctx, campaignId, ifMatch);
   await visibleCampaign(tx, ctx, campaignId);
-  if (!canEditFor(ctx, locked.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, locked.owner_id, locked.last_owner_id)) throw forbidden();
   if (locked.stage !== 'NEGOTIATION') throw new ApiError(409, 'TRANSITION_NOT_ALLOWED', 'Отправить на согласование можно с этапа «Переговоры с сетью».', { stage: locked.stage });
   const comment = typeof b.comment === 'string' ? b.comment.trim() : '';
   if (comment.length > 2000) throw invalid('comment', 'Не длиннее 2000 символов.');
@@ -143,13 +143,13 @@ export async function submit(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
   if (done) await campaignEvent(tx, ctx, campaignId, 'STAGE', { from: 'APPROVAL', to: 'APPROVED', comment: 'Все шаги маршрута пропущены по условиям.' });
   const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'approval', entityId: approvalId, action: 'SUBMIT', after: { campaign_id: campaignId, round, version: v.number, template: route.template.name, steps: route.steps.map((s) => ({ title: s.title, included: s.included, candidates: s.candidates.map((x) => x.name) })) } });
-  return { status: 201, body: { id: approvalId, round, stage: to, revision: rev }, etag: campaignEtag(campaignId, rev) };
+  return { status: 201, body: { id: approvalId, round, stage: to, revision: rev }, etag: campaignEtag(campaignId, rev, locked.owner_id) };
 }
 
 export async function withdraw(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: string | undefined, b: Record<string, unknown>): Promise<CommandResult> {
   const locked = await lockCampaign(tx, ctx, campaignId, ifMatch);
   await visibleCampaign(tx, ctx, campaignId);
-  if (!canEditFor(ctx, locked.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, locked.owner_id, locked.last_owner_id)) throw forbidden();
   const comment = typeof b.comment === 'string' ? b.comment.trim() : '';
   if (comment.length > 2000) throw invalid('comment', 'Не длиннее 2000 символов.');
   const a = locked.stage === 'APPROVAL' ? await activeApproval(tx, ctx.clientId, campaignId) : undefined;
@@ -161,7 +161,7 @@ export async function withdraw(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: st
   await setStage(tx, ctx, campaignId, 'APPROVAL', 'NEGOTIATION', null);
   const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'approval', entityId: a.id, action: 'WITHDRAW', reason: comment || null });
-  return { status: 200, body: { stage: 'NEGOTIATION', revision: rev }, etag: campaignEtag(campaignId, rev) };
+  return { status: 200, body: { stage: 'NEGOTIATION', revision: rev }, etag: campaignEtag(campaignId, rev, locked.owner_id) };
 }
 
 // Решения ----------------------------------------------------------------------
@@ -247,7 +247,7 @@ export async function decide(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: stri
   }
   const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'approval', entityId: a.id, action: decision, reason: comment || null, after: { step: step.position, title: step.title, for_user: right.forUser } });
-  return { status: 200, body: { stage, revision: rev }, etag: campaignEtag(campaignId, rev) };
+  return { status: 200, body: { stage, revision: rev }, etag: campaignEtag(campaignId, rev, locked.owner_id) };
 }
 
 // Новая версия после «Согласовано внутри» -------------------------------------------
@@ -305,7 +305,7 @@ export async function getApproval(ctx: Ctx, campaignId: string) {
       }
     }
   }
-  const edit = canEditFor(ctx, c.owner_id);
+  const edit = canEditFor(ctx, c.owner_id, c.last_owner_id);
   const canWithdraw = Boolean(current && edit && !current.steps.some((s: { status: string }) => s.status === 'APPROVED'));
   // Предпросмотр маршрута до отправки: КАМ видит, к кому уйдёт кампания.
   let preview = null;

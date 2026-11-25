@@ -17,8 +17,8 @@ const CLOSED = ['CANCELLED', 'CLOSED'];
 async function visibleCampaign(ctx: Ctx, campaignId: string, q: Pick<Tx, 'query'> = ctx.db) {
   if (!isUuid(campaignId)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
-  const { rows } = await q.query<{ id: string; owner_id: string | null; stage: string }>(
-    `select c.id, c.owner_id, c.stage from kam.campaign_with_owner c where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, campaignId, ...vis.params]);
+  const { rows } = await q.query<{ id: string; owner_id: string | null; last_owner_id: string | null; stage: string }>(
+    `select c.id, c.owner_id, c.last_owner_id, c.stage from kam.campaign_with_owner c where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, campaignId, ...vis.params]);
   if (!rows[0]) throw notFound();
   return rows[0];
 }
@@ -40,7 +40,7 @@ export async function listDocuments(ctx: Ctx, campaignId: string) {
  */
 export async function upload(ctx: Ctx, campaignId: string, req: FastifyRequest): Promise<CommandResult> {
   const c = await visibleCampaign(ctx, campaignId);
-  if (!canEditFor(ctx, c.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, c.owner_id, c.last_owner_id)) throw forbidden();
   if (CLOSED.includes(c.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Кампания отменена или закрыта — документы не добавляются.');
   if (!req.isMultipart()) throw new ApiError(415, 'MULTIPART_REQUIRED', 'Передайте файл формой multipart/form-data.');
   const part = await req.file({ limits: { fileSize: MAX_FILE_BYTES, files: 1, fields: 5, fieldSize: 4000 } });
@@ -62,7 +62,7 @@ export async function upload(ctx: Ctx, campaignId: string, req: FastifyRequest):
 
   return withTx(ctx.db, async (tx) => {
     const locked = await lockCampaignRecord(tx, ctx.clientId, campaignId);
-    if (!canEditFor(ctx, locked.owner_id)) throw forbidden();
+    if (!canEditFor(ctx, locked.owner_id, locked.last_owner_id)) throw forbidden();
     if (CLOSED.includes(locked.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Кампания отменена или закрыта — документы не добавляются.');
     const dup = (await tx.query<{ id: string }>('select id from kam.document where client_id=$1 and campaign_id=$2 and sha256=$3 and archived_at is null limit 1',
       [ctx.clientId, campaignId, stored.sha256])).rows[0];
@@ -81,7 +81,7 @@ export async function upload(ctx: Ctx, campaignId: string, req: FastifyRequest):
 export async function archive(tx: Tx, ctx: Ctx, campaignId: string, docId: string, b: Record<string, unknown>): Promise<CommandResult> {
   const c = await lockCampaignRecord(tx, ctx.clientId, campaignId);
   await visibleCampaign(ctx, campaignId, tx);
-  if (!canEditFor(ctx, c.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, c.owner_id, c.last_owner_id)) throw forbidden();
   if (CLOSED.includes(c.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Кампания отменена или закрыта.');
   if (!isUuid(docId)) throw notFound();
   const reason = typeof b.reason === 'string' ? b.reason.trim() : '';

@@ -17,13 +17,13 @@ const money = (v: unknown) => Math.round(Number(v) * 100) / 100;
 
 type Q = Pick<Tx, 'query'>;
 
-interface CampaignRow { id: string; owner_id: string | null; network_id: string; stage: string; period_from: string; period_to: string; period_split: Split }
+interface CampaignRow { id: string; owner_id: string | null; last_owner_id: string | null; network_id: string; stage: string; period_from: string; period_to: string; period_split: Split }
 
 async function campaignFor(q: Q, ctx: Ctx, id: string): Promise<CampaignRow> {
   if (!isUuid(id)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
   const { rows } = await q.query<CampaignRow>(
-    `select c.id, c.owner_id, c.network_id, c.stage, c.period_from, c.period_to, t.period_split
+    `select c.id, c.owner_id, c.last_owner_id, c.network_id, c.stage, c.period_from, c.period_to, t.period_split
        from kam.campaign_with_owner c join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
       where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, id, ...vis.params]);
   if (!rows[0]) throw notFound();
@@ -77,7 +77,7 @@ export async function normalizeCells(q: Q, clientId: string, periods: Period[], 
 export async function createVersion(tx: Tx, ctx: Ctx, campaignId: string, ifMatch: string | undefined, b: Record<string, unknown>): Promise<CommandResult> {
   await lockCampaign(tx, ctx, campaignId, ifMatch);
   const c = await campaignFor(tx, ctx, campaignId);
-  if (!canEditFor(ctx, c.owner_id)) throw forbidden();
+  if (!canEditFor(ctx, c.owner_id, c.last_owner_id)) throw forbidden();
   if (!VERSION_STAGES.includes(c.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Новую версию можно добавить на этапах подготовки, переговоров и «Согласовано внутри». На согласовании сначала отзовите отправку.');
   const periods = campaignPeriods(c);
   const cells = await normalizeCells(tx, ctx.clientId, periods, b.cells);
@@ -137,7 +137,7 @@ export async function createVersion(tx: Tx, ctx: Ctx, campaignId: string, ifMatc
   }
   const rev = await bumpCampaign(tx, ctx, campaignId);
   await audit(tx, ctx, { entityType: 'version', entityId: id, action: 'CREATE', after: { campaign_id: campaignId, number, total_investment: totalInv, total_turnover: totalTurn, brands: new Set(cells.map((x) => x.brand_id)).size } });
-  return { status: 201, body: { id, number, total_investment: totalInv, total_turnover: totalTurn, stage, tolerance }, etag: campaignEtag(campaignId, rev) };
+  return { status: 201, body: { id, number, total_investment: totalInv, total_turnover: totalTurn, stage, tolerance }, etag: campaignEtag(campaignId, rev, c.owner_id) };
 }
 
 // Чтение версии ------------------------------------------------------------

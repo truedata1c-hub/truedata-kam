@@ -115,9 +115,9 @@ test('версии неизменяемы, номера растут, устар
   // Чужой КАМ кампанию не видит; финансовый директор видит, но версию не создаёт.
   assert.equal((await call(`${C(env)}/campaigns/${c.id}/versions`, { as: 'ilya.ivanov', ifMatch: v2.etag, body: body(1) })).status, 404);
   assert.equal((await call(`${C(env)}/campaigns/${c.id}/versions`, { as: 'igor.vasiliev', ifMatch: v2.etag, body: body(1) })).status, 403);
-  const inApproval = await one<{ id: string; revision: number }>("select id, revision from kam.campaign where stage='APPROVAL' and owner_id=(select id from kam.app_user where email='maria.kuznetsova@demo.test') limit 1");
+  const inApproval = await one<{ id: string; revision: number }>("select id, revision from kam.campaign_with_owner where stage='APPROVAL' and owner_id=(select id from kam.app_user where email='maria.kuznetsova@demo.test') limit 1");
   if (inApproval) {
-    const r = await call(`${C(env)}/campaigns/${inApproval.id}/versions`, { as: 'maria.kuznetsova', ifMatch: `"campaign:${inApproval.id}:${inApproval.revision}"`, body: body(1) });
+    const r = await call(`${C(env)}/campaigns/${inApproval.id}/versions`, { as: 'maria.kuznetsova', ifMatch: (await call(`${C(env)}/campaigns/${inApproval.id}`, { as: 'maria.kuznetsova' })).etag!, body: body(1) });
     assert.equal(r.json.error.code, 'STAGE_LOCKED');
   }
 });

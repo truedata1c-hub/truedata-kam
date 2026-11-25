@@ -71,13 +71,15 @@ export async function runCommand(
   });
 }
 
-export const campaignEtag = (id: string, revision: number) => `"campaign:${id}:${revision}"`;
+/** Ревизия кампании и её действующий КАМ: передача сети делает открытые формы устаревшими, как и правка кампании. */
+export const campaignEtag = (id: string, revision: number, ownerId: string | null) => `"campaign:${id}:${revision}:${ownerId ? ownerId.slice(0, 8) : '-'}"`;
 
 export interface LockedCampaign {
   id: string;
   revision: number;
   stage: string;
   owner_id: string | null;
+  last_owner_id: string | null;
   network_id: string;
 }
 
@@ -90,7 +92,7 @@ export async function lockCampaignRecord(tx: Tx, clientId: string, id: string): 
   if (!locked.rowCount) throw notFound();
   // Отдельное чтение видит закрепление, которое могло смениться за время ожидания блокировки.
   const { rows } = await tx.query<LockedCampaign>(
-    'select id, revision, stage, owner_id, network_id from kam.campaign_with_owner where client_id=$1 and id=$2', [clientId, id]);
+    'select id, revision, stage, owner_id, last_owner_id, network_id from kam.campaign_with_owner where client_id=$1 and id=$2', [clientId, id]);
   return rows[0]!;
 }
 
@@ -99,7 +101,10 @@ export async function lockCampaign(tx: Tx, ctx: Ctx, id: string, ifMatch: string
   if (!isUuid(id)) throw notFound();
   if (!ifMatch) throw new ApiError(428, 'REVISION_REQUIRED', 'Передайте заголовок If-Match с ревизией кампании.');
   const c = await lockCampaignRecord(tx, ctx.clientId, id);
-  if (ifMatch.trim() !== campaignEtag(c.id, c.revision)) {
+  if (ifMatch.trim() !== campaignEtag(c.id, c.revision, c.owner_id)) {
+    if (ifMatch.trim() === `"campaign:${c.id}:${c.revision}"` || ifMatch.trim().startsWith(`"campaign:${c.id}:${c.revision}:`)) {
+      throw new ApiError(412, 'STALE_REVISION', 'Ответственный КАМ по кампании сменился: сеть передана другому сотруднику. Обновите карточку.', { current_revision: c.revision, owner_changed: true });
+    }
     throw new ApiError(412, 'STALE_REVISION', 'Кампанию уже изменили. Обновите данные и повторите.', { current_revision: c.revision });
   }
   return c;
