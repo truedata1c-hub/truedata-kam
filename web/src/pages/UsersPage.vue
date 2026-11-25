@@ -59,8 +59,9 @@
           <form v-else class="formGrid" @submit.prevent="invite">
             <div class="full"><label class="fieldLabel" for="iv-email">Почта<span class="req">*</span></label>
               <q-input for="iv-email" v-model="inv.email" outlined dense type="email" aria-label="Почта" hide-bottom-space autofocus :error="err.field === 'email'" /></div>
-            <div class="full"><label class="fieldLabel" for="iv-name">Имя и фамилия<span class="req">*</span></label>
-              <q-input for="iv-name" v-model="inv.name" outlined dense maxlength="120" aria-label="Имя и фамилия" hide-bottom-space :error="err.field === 'display_name'" /></div>
+            <div class="full"><label class="fieldLabel" for="iv-name">Фамилия, имя, отчество<span class="req">*</span></label>
+              <q-input for="iv-name" v-model="inv.name" outlined dense maxlength="120" hide-bottom-space :error="err.field === 'display_name'" />
+              <div class="fieldHint">Отчество можно пропустить.</div></div>
             <div class="full"><label class="fieldLabel">Роли</label>
               <div class="choiceGrid">
                 <label v-for="r in activeRoles" :key="r.id" class="choice" :class="{ on: inv.roles.includes(r.id) }">

@@ -95,17 +95,18 @@ export async function logout(db: Db, token: string): Promise<void> {
   await db.query('delete from kam.session where token_hash = $1', [tokenHash(token)]);
 }
 
-export async function principalFromToken(db: Db, token: string | undefined): Promise<Principal | null> {
+export async function principalFromToken(db: Db, token: string | undefined, clientId?: string): Promise<Principal | null> {
   if (!token) return null;
-  const { rows } = await db.query<{ id: string; email: string; display_name: string; must_change_password: boolean; via: 'PASSWORD' | 'SSO'; client_id: string | null }>(
-    `select u.id, u.email, u.display_name, u.must_change_password, s.via, m.client_id
+  const { rows } = await db.query<{ id: string; email: string; display_name: string; member_name: string | null; must_change_password: boolean; via: 'PASSWORD' | 'SSO'; client_id: string | null }>(
+    `select u.id, u.email, u.display_name, m.display_name member_name, u.must_change_password, s.via, m.client_id
        from kam.session s join kam.app_user u on u.id = s.user_id
        left join kam.membership m on m.user_id = u.id and m.active
       where s.token_hash = $1 and s.expires_at > now() and not u.disabled`, [tokenHash(token)]);
   const first = rows[0];
   if (!first) return null;
+  const member = rows.length === 1 ? first : rows.find((r) => r.client_id === clientId);
   return {
-    userId: first.id, email: first.email, displayName: first.display_name, via: first.via,
+    userId: first.id, email: first.email, displayName: member?.member_name ?? first.display_name, via: first.via,
     mustChangePassword: first.via === 'PASSWORD' && first.must_change_password,
     clientIds: new Set(rows.map((r) => r.client_id).filter((c): c is string => Boolean(c))),
   };

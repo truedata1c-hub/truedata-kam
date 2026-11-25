@@ -7,7 +7,7 @@ import type { Db, Tx } from './db.js';
 import { withTx } from './db.js';
 import { invalid } from './errors.js';
 import { type Ctx, requirePermission } from './access.js';
-import { type CommandResult, audit, isUuid } from './commands.js';
+import { type CommandResult, audit, isUuid, lockCampaignRecord } from './commands.js';
 import { readSettings, writeSetting } from './settings.js';
 import { openSecret, sealSecret } from './secrets.js';
 
@@ -79,7 +79,7 @@ export async function notify(q: Q, clientId: string, n: NotifyInput): Promise<nu
 export async function listNotifications(ctx: Ctx, q: { unread?: string }) {
   const { rows } = await ctx.db.query(
     `select n.id, n.kind, n.title, n.body, n.campaign_id, n.created_at, n.read_at, a.display_name actor_name
-       from kam.notification n left join kam.app_user a on a.id = n.actor_id
+       from kam.notification n left join kam.employee_profile a on a.client_id = n.client_id and a.id = n.actor_id
       where n.client_id=$1 and n.user_id=$2 ${q.unread === '1' ? 'and n.read_at is null' : ''}
       order by n.created_at desc limit 50`, [ctx.clientId, ctx.principal.userId]);
   const unread = (await ctx.db.query<{ n: number }>('select count(*)::int n from kam.notification where client_id=$1 and user_id=$2 and read_at is null',
@@ -259,16 +259,22 @@ export async function runSchedule(db: Db): Promise<{ reminders: number; overdue:
       }
     });
   }
-  const { rows: late } = await db.query<{ client_id: string; id: string; owner_id: string; network: string; title: string; control_date: string }>(
-    `select c.client_id, c.id, c.owner_id, n.name network, c.title, c.control_date::text control_date from kam.campaign c
-       join kam.network n on n.client_id = c.client_id and n.id = c.network_id
-      where c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL']) and c.control_overdue_notified_at is null`);
+  const { rows: late } = await db.query<{ client_id: string; id: string }>(
+    `select c.client_id, c.id from kam.campaign_with_owner c
+      where c.owner_id is not null and c.control_date < current_date and c.stage = any(array['PREPARATION','NEGOTIATION','APPROVAL']) and c.control_overdue_notified_at is null`);
   for (const c of late) {
     await withTx(db, async (db) => {
-      const manager = (await db.query<{ manager_id: string }>('select manager_id from kam.user_manager where client_id=$1 and user_id=$2 and valid @> current_date', [c.client_id, c.owner_id])).rows[0]?.manager_id;
-      await notify(db, c.client_id, { kind: 'CONTROL_OVERDUE', users: [c.owner_id, manager], campaignId: c.id,
-        title: `Просрочена контрольная дата: ${c.network} — ${c.title}`, body: `Условия должны были быть согласованы к ${c.control_date.split('-').reverse().join('.')}.` });
-      await db.query('update kam.campaign set control_overdue_notified_at=now() where client_id=$1 and id=$2', [c.client_id, c.id]);
+      const { owner_id } = await lockCampaignRecord(db, c.client_id, c.id);
+      if (!owner_id) return;
+      const { rows: [due] } = await db.query<{ network: string; title: string; control_date: string }>(
+        `update kam.campaign c set control_overdue_notified_at=now() from kam.network n
+          where c.client_id=$1 and c.id=$2 and n.client_id=c.client_id and n.id=c.network_id
+            and c.control_date < current_date and c.stage in ('PREPARATION','NEGOTIATION','APPROVAL') and c.control_overdue_notified_at is null
+          returning n.name as network, c.title, c.control_date`, [c.client_id, c.id]);
+      if (!due) return;
+      const manager = (await db.query<{ manager_id: string }>('select manager_id from kam.user_manager where client_id=$1 and user_id=$2 and valid @> current_date', [c.client_id, owner_id])).rows[0]?.manager_id;
+      await notify(db, c.client_id, { kind: 'CONTROL_OVERDUE', users: [owner_id, manager], campaignId: c.id,
+        title: `Просрочена контрольная дата: ${due.network} — ${due.title}`, body: `Условия должны были быть согласованы к ${due.control_date.split('-').reverse().join('.')}.` });
       control += 1;
     });
   }

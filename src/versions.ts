@@ -17,14 +17,14 @@ const money = (v: unknown) => Math.round(Number(v) * 100) / 100;
 
 type Q = Pick<Tx, 'query'>;
 
-interface CampaignRow { id: string; owner_id: string; network_id: string; stage: string; period_from: string; period_to: string; period_split: Split }
+interface CampaignRow { id: string; owner_id: string | null; network_id: string; stage: string; period_from: string; period_to: string; period_split: Split }
 
 async function campaignFor(q: Q, ctx: Ctx, id: string): Promise<CampaignRow> {
   if (!isUuid(id)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
   const { rows } = await q.query<CampaignRow>(
     `select c.id, c.owner_id, c.network_id, c.stage, c.period_from, c.period_to, t.period_split
-       from kam.campaign c join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
+       from kam.campaign_with_owner c join kam.campaign_type t on t.client_id = c.client_id and t.id = c.type_id
       where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, id, ...vis.params]);
   if (!rows[0]) throw notFound();
   return rows[0];
@@ -190,7 +190,7 @@ async function priorFor(q: Q, clientId: string, networkId: string, from: string,
 }
 
 /** Бренд-менеджер (область «свои бренды», без права вести кампанию) видит свои бренды подробно, остальные — итогом. */
-async function brandLimit(q: Q, ctx: Ctx, ownerId: string): Promise<Set<string> | null> {
+async function brandLimit(q: Q, ctx: Ctx, ownerId: string | null): Promise<Set<string> | null> {
   const s = ctx.access.scopes;
   if (!s.has('BRANDS') || s.has('ALL') || s.has('SUBORDINATES') || canEditFor(ctx, ownerId)) return null;
   const { rows } = await q.query<{ brand_id: string }>('select brand_id from kam.user_brand where client_id=$1 and user_id=$2', [ctx.clientId, ctx.principal.userId]);
@@ -203,7 +203,7 @@ export async function listVersions(ctx: Ctx, campaignId: string) {
     `select v.number, v.created_at, u.display_name author, v.total_investment::float8 investment, v.total_turnover::float8 turnover, v.comment,
             (select count(*)::int from kam.offer_version_document d where d.client_id = v.client_id and d.version_id = v.id) documents,
             (select count(distinct brand_id)::int from kam.offer_version_cell x where x.client_id = v.client_id and x.version_id = v.id) brands
-       from kam.offer_version v join kam.app_user u on u.id = v.created_by
+       from kam.offer_version v join kam.employee_profile u on u.client_id = v.client_id and u.id = v.created_by
       where v.client_id=$1 and v.campaign_id=$2 order by v.number desc`, [ctx.clientId, campaignId]);
   return rows.map((r) => ({ ...r, roi: roi(r.investment, r.turnover) }));
 }
@@ -216,7 +216,7 @@ export async function getVersion(ctx: Ctx, campaignId: string, numberParam: stri
   if (!Number.isInteger(number) || number < 1) throw notFound();
   const v = (await ctx.db.query<{ id: string; number: number; periods: Period[]; justification: string; comment: string; created_at: string; author: string }>(
     `select v.id, v.number, v.periods, v.justification, v.comment, v.created_at, u.display_name author
-       from kam.offer_version v join kam.app_user u on u.id = v.created_by where v.client_id=$1 and v.campaign_id=$2 and v.number=$3`,
+       from kam.offer_version v join kam.employee_profile u on u.client_id = v.client_id and u.id = v.created_by where v.client_id=$1 and v.campaign_id=$2 and v.number=$3`,
     [ctx.clientId, campaignId, number])).rows[0];
   if (!v) throw notFound();
   const cellsOf = async (versionId: string) => (await ctx.db.query<{ brand_id: string; name: string; period_key: string; investment: number; turnover: number }>(

@@ -82,11 +82,11 @@
           <TdSelect v-if="state.me.companies.length > 1" :model-value="state.companyId" :options="companyOptions" aria-label="Компания" @update:model-value="(v: unknown) => switchCompany(v as string)" />
           <span v-else-if="company" class="note">{{ company.name }}</span>
           <NotificationBell v-if="company" />
-          <button class="avatar" :aria-label="`Профиль: ${state.me.display_name}`">
-            {{ initials(state.me.display_name) }}
+          <button class="avatar" :aria-label="`Профиль: ${profileName}`">
+            {{ initials(profileName) }}
             <q-menu anchor="bottom right" self="top right" :offset="[0, 6]">
               <div style="min-width: 240px; padding: 12px 14px">
-                <div style="font-weight: 600">{{ state.me.display_name }}</div>
+                <div style="font-weight: 600">{{ profileName }}</div>
                 <div class="muted">{{ state.me.email }}</div>
                 <div class="note" style="margin-top: 8px">{{ company?.name }}</div>
                 <div class="muted">{{ company?.roles.join(', ') || 'роли не назначены' }}</div>
@@ -169,6 +169,7 @@ const embedTabs = computed(() => [
   ...(isAdmin.value ? [{ page: 'users' as Page, label: 'Настройки', active: adminPage.value, disabled: false, hint: '' }] : []),
 ]);
 const companyOptions = computed(() => (state.me?.companies ?? []).map((c) => ({ label: c.name, value: c.id })));
+const profileName = computed(() => company.value?.display_name ?? state.me?.display_name ?? '');
 
 // Страница по маршруту; ключ по компании пересоздаёт её при смене клиента.
 const PageBody = defineComponent({

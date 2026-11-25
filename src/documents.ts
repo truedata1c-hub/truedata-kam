@@ -8,7 +8,7 @@ import type { Tx } from './db.js';
 import { withTx } from './db.js';
 import { ApiError, forbidden, invalid, notFound, required } from './errors.js';
 import { type Ctx, campaignVisibility, canEditFor } from './access.js';
-import { type CommandResult, audit, campaignEvent, isUuid } from './commands.js';
+import { type CommandResult, audit, campaignEvent, isUuid, lockCampaignRecord } from './commands.js';
 import { MAX_FILE_BYTES, PREVIEWABLE, blobPath, blocked, filesDir, mimeOf, safeName, storeStream } from './files.js';
 
 export const DOC_KINDS = ['OUR_OFFER', 'NETWORK_OFFER', 'MEETING_MINUTES', 'CALCULATION', 'NETWORK_CONFIRMATION', 'SIGNED_CONTRACT', 'FINAL_TERMS', 'OTHER'] as const;
@@ -17,8 +17,8 @@ const CLOSED = ['CANCELLED', 'CLOSED'];
 async function visibleCampaign(ctx: Ctx, campaignId: string, q: Pick<Tx, 'query'> = ctx.db) {
   if (!isUuid(campaignId)) throw notFound();
   const vis = campaignVisibility(ctx, 3);
-  const { rows } = await q.query<{ id: string; owner_id: string; stage: string }>(
-    `select c.id, c.owner_id, c.stage from kam.campaign c where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, campaignId, ...vis.params]);
+  const { rows } = await q.query<{ id: string; owner_id: string | null; stage: string }>(
+    `select c.id, c.owner_id, c.stage from kam.campaign_with_owner c where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, campaignId, ...vis.params]);
   if (!rows[0]) throw notFound();
   return rows[0];
 }
@@ -29,7 +29,7 @@ export async function listDocuments(ctx: Ctx, campaignId: string) {
             d.archived_at, d.archive_reason, au.display_name archived_by_name,
             coalesce((select array_agg(v.number order by v.number) from kam.offer_version_document vd join kam.offer_version v on v.client_id = vd.client_id and v.id = vd.version_id
                        where vd.client_id = d.client_id and vd.document_id = d.id), '{}') versions
-       from kam.document d join kam.app_user u on u.id = d.uploaded_by left join kam.app_user au on au.id = d.archived_by
+       from kam.document d join kam.employee_profile u on u.client_id = d.client_id and u.id = d.uploaded_by left join kam.employee_profile au on au.client_id = d.client_id and au.id = d.archived_by
       where d.client_id=$1 and d.campaign_id=$2 order by d.archived_at nulls first, d.uploaded_at desc`, [ctx.clientId, campaignId]);
   return rows.map((r) => ({ ...r, previewable: PREVIEWABLE.has(r.mime) }));
 }
@@ -61,7 +61,8 @@ export async function upload(ctx: Ctx, campaignId: string, req: FastifyRequest):
   if (stored.rejected) throw invalid('file', 'Исполняемые файлы и веб-страницы не принимаются.', 'FILE_TYPE_BLOCKED');
 
   return withTx(ctx.db, async (tx) => {
-    const locked = (await tx.query<{ stage: string }>('select stage from kam.campaign where client_id=$1 and id=$2 for update', [ctx.clientId, campaignId])).rows[0]!;
+    const locked = await lockCampaignRecord(tx, ctx.clientId, campaignId);
+    if (!canEditFor(ctx, locked.owner_id)) throw forbidden();
     if (CLOSED.includes(locked.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Кампания отменена или закрыта — документы не добавляются.');
     const dup = (await tx.query<{ id: string }>('select id from kam.document where client_id=$1 and campaign_id=$2 and sha256=$3 and archived_at is null limit 1',
       [ctx.clientId, campaignId, stored.sha256])).rows[0];
@@ -78,8 +79,10 @@ export async function upload(ctx: Ctx, campaignId: string, req: FastifyRequest):
 }
 
 export async function archive(tx: Tx, ctx: Ctx, campaignId: string, docId: string, b: Record<string, unknown>): Promise<CommandResult> {
-  const c = await visibleCampaign(ctx, campaignId, tx);
+  const c = await lockCampaignRecord(tx, ctx.clientId, campaignId);
+  await visibleCampaign(ctx, campaignId, tx);
   if (!canEditFor(ctx, c.owner_id)) throw forbidden();
+  if (CLOSED.includes(c.stage)) throw new ApiError(409, 'STAGE_LOCKED', 'Кампания отменена или закрыта.');
   if (!isUuid(docId)) throw notFound();
   const reason = typeof b.reason === 'string' ? b.reason.trim() : '';
   if (!reason) throw required('reason', 'Укажите причину.');

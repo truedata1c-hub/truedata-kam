@@ -42,7 +42,21 @@ Docker Compose project `truedata-kam` в каталоге `/opt/truedata/kam`:
 3. поднимает новую версию и ждёт `healthy`;
 4. если версия не поднялась — возвращает прежний образ и прежний `compose.yaml`.
 
-Миграции базы применяются при старте `api` и только добавляют. Откат кода после миграции безопасен: старая версия не использует новые таблицы.
+Миграции базы применяются при старте `api`. После отката кода ограничение единственного КАМа за сетью продолжает действовать в базе.
+
+Перед выпуском с миграцией `006_network_assignment_period.sql` проверьте пересечения за все даты, включая завершённые периоды.
+
+```sql
+select c.code, n.name, u.display_name as kam_1, v.display_name as kam_2,
+       a.valid * b.valid as overlap
+  from kam.kam_assignment a join kam.kam_assignment b
+    on a.client_id=b.client_id and a.network_id=b.network_id and a.id<b.id and a.valid && b.valid
+  join kam.client c on c.id=a.client_id
+  join kam.network n on (n.client_id,n.id)=(a.client_id,a.network_id)
+  join kam.app_user u on u.id=a.user_id join kam.app_user v on v.id=b.user_id;
+```
+
+Для каждой найденной пары согласуйте с администратором дату передачи сети и скорректируйте периоды. Миграция устанавливает ограничение после устранения всех пересечений.
 
 Ручной откат на конкретную версию: перезапустить workflow `deploy` для нужной ветки `release/…`.
 

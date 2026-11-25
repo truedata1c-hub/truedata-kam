@@ -85,3 +85,48 @@ test('сессия в cookie: изменяющий запрос без служ�
   const upload = await env.app.inject({ method: 'POST', url: `${C(env)}/prior-periods/import`, headers: { cookie, 'content-type': 'multipart/form-data; boundary=x' }, payload: '--x--\r\n' });
   assert.equal(upload.json().error.code, 'CSRF_HEADER_REQUIRED');
 });
+
+test('исправленное ФИО видно в кампаниях своей компании и сохраняется при повторном входе из платформы', async () => {
+  const email = 'dmitry.petrov@demo.test';
+  const fullName = 'Петров Дмитрий Игоревич';
+  const platformUser = claims({ sub: 'employee-petrov', email, name: 'DEV account' });
+  const enter = async () => {
+    const res = await sso(signToken(env.keys.privatePem, platformUser));
+    assert.equal(res.statusCode, 303);
+    env.tokens.employee = res.cookies.find((c) => c.name === 'kam_session')!.value;
+    return (await call('/api/kam/v1/me', { as: 'employee' })).json;
+  };
+  const previous = await enter();
+  const id = previous.user_id;
+  const url = `${C(env)}/users/${id}`;
+  const patch = (body: object, as = 'admin') => call(url, { as, method: 'PATCH', body });
+  assert.equal((await patch({ display_name: fullName }, 'employee')).status, 403);
+  for (const display_name of ['   ', 'а'.repeat(121)]) {
+    assert.equal((await patch({ display_name })).json.error.field, 'display_name');
+  }
+  assert.equal((await patch({ email: 'new@demo.test', display_name: fullName })).json.error.field, 'email');
+  const before = (await call(`${C(env)}/campaigns`, { as: 'employee' })).json.items;
+  assert.ok(before.length > 0);
+  assert.equal((await patch({ display_name: '  Петров  Дмитрий Игоревич  ' })).status, 200);
+  const again = await enter();
+  assert.equal(again.user_id, id);
+  assert.equal(again.email, email);
+  assert.equal(again.display_name, fullName);
+  assert.deepEqual(again.companies[0].roles, previous.companies[0].roles);
+  const after = (await call(`${C(env)}/campaigns`, { as: 'employee' })).json.items;
+  assert.deepEqual(after.map((c: { id: string }) => c.id).sort(), before.map((c: { id: string }) => c.id).sort());
+  assert.ok(after.every((c: { owner_name: string }) => c.owner_name === fullName));
+  const card = (await call(`${C(env)}/campaigns/${after[0].id}`, { as: 'employee' })).json;
+  assert.deepEqual(card.owner, { id, name: fullName, email });
+  const events = (await call(`${C(env)}/audit`, { as: 'admin', query: { entity_type: 'user' } })).json.items;
+  const rename = events.find((e: { entity_id: string; action: string }) => e.entity_id === id && e.action === 'UPDATE');
+  assert.deepEqual(rename.before, { display_name: previous.display_name });
+  assert.deepEqual(rename.after, { display_name: fullName });
+
+  await env.db.query('insert into kam.membership(client_id, user_id) values ($1,$2)', [env.other, id]);
+  const otherList = (await call(`${C(env, env.other)}/users`, { as: 'admin@other.test' })).json.items;
+  assert.equal(otherList.find((u: { id: string }) => u.id === id).display_name, previous.display_name);
+  const me = await enter();
+  assert.equal(me.companies.find((c: { id: string }) => c.id === env.demo).display_name, fullName);
+  assert.equal(me.companies.find((c: { id: string }) => c.id === env.other).display_name, previous.display_name);
+});

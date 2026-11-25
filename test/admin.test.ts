@@ -51,9 +51,22 @@ test('оргструктура: смена руководителя меняет
   assert.equal(cycle.json.error.code, 'MANAGER_CYCLE');
 });
 
-test('закрепление за сетью: добавить и завершить; пересечение запрещено', async () => {
+test('занятую сеть можно передать только после открепления у названного КАМа', async () => {
   const ilya = await userId('ilya.ivanov');
-  const network = (await env.db.query<{ id: string }>("select id from kam.network where name='Озерки'")).rows[0]!.id;
+  const { rows: [initial] } = await env.db.query<{ id: string; network_id: string; user_id: string; name: string }>(
+    `select a.id, a.network_id, a.user_id, u.display_name as name from kam.kam_assignment a
+       join kam.network n on (n.client_id,n.id)=(a.client_id,a.network_id) join kam.app_user u on u.id=a.user_id
+      where a.client_id=$1 and n.name='Озерки' and a.valid @> current_date`, [env.demo]);
+  assert.ok(initial);
+  const network = initial.network_id;
+  const blocked = await call(`${C(env)}/users/${ilya}/assignments`, { as: 'admin', body: { network_id: network } });
+  assert.equal(blocked.status, 409);
+  assert.equal(blocked.json.error.code, 'NETWORK_ALREADY_ASSIGNED');
+  assert.equal(blocked.json.error.field, 'network_id');
+  assert.equal(blocked.json.error.details.user_id, initial.user_id);
+  assert.ok(blocked.json.error.message.includes(initial.name));
+  assert.match(blocked.json.error.message, /Сначала открепите сеть/);
+  assert.equal((await call(`${C(env)}/assignments/${initial.id}/end`, { as: 'admin', body: {} })).status, 200);
   const add = await call(`${C(env)}/users/${ilya}/assignments`, { as: 'admin', body: { network_id: network } });
   assert.equal(add.status, 201);
   const dup = await call(`${C(env)}/users/${ilya}/assignments`, { as: 'admin', body: { network_id: network } });
@@ -63,6 +76,46 @@ test('закрепление за сетью: добавить и заверши
   assert.equal((await call(`${C(env)}/assignments/${add.json.id}/end`, { as: 'admin', body: {} })).status, 200);
   const refs2 = (await call(`${C(env)}/reference`, { as: 'ilya.ivanov' })).json;
   assert.ok(!refs2.networks.some((n: any) => n.name === 'Озерки'));
+});
+
+test('конкурирующие назначения: один КАМ на сеть и дату в каждой компании', async () => {
+  const net = await call(`${C(env)}/networks`, { as: 'admin', body: { name: 'Проверка закреплений' } });
+  assert.equal(net.status, 201);
+  const network = net.json.id;
+  const kams = [await userId('ilya.ivanov'), await userId('tatiana.lebedeva')];
+  const assign = (id: string, from: string, to: string) => call(`${C(env)}/users/${id}/assignments`,
+    { as: 'admin', body: { network_id: network, from, to } });
+  const results = await Promise.all(kams.map((id) => assign(id, '2090-05-01', '2090-05-15')));
+  assert.deepEqual(results.map((r) => r.status).sort(), [201, 409]);
+  const winner = results.findIndex((r) => r.status === 201);
+  const loser = 1 - winner;
+  assert.equal(results[loser]!.json.error.details.user_id, kams[winner]);
+  assert.equal((await assign(kams[loser]!, '2090-05-15', '2090-05-19')).status, 409, 'последний день включён');
+  assert.equal((await assign(kams[loser]!, '2090-05-16', '2090-05-19')).status, 201, 'последовательные периоды разрешены');
+
+  const directInsert = (clientId: string, user: string) => env.db.query(
+    `insert into kam.kam_assignment(client_id,id,user_id,network_id,valid)
+     values ($1,gen_random_uuid(),$2,$3,daterange('2090-05-01','2090-05-15','[]'))`, [clientId, user, network]);
+  await assert.rejects(directInsert(env.demo, kams[loser]!), { code: '23P01', constraint: 'kam_assignment_network_period_excl' });
+  await env.db.query("insert into kam.network(client_id,id,name) values ($1,$2,'Сеть второго клиента')", [env.other, network]);
+  const otherAdmin = (await env.db.query<{ id: string }>("select id from kam.app_user where email='admin@other.test'")).rows[0]!.id;
+  assert.equal((await directInsert(env.other, otherAdmin)).rowCount, 1);
+});
+
+test('завершённое закрепление защищает свою историю и допускает последующую передачу', async () => {
+  const net = await call(`${C(env)}/networks`, { as: 'admin', body: { name: 'История закреплений' } });
+  const first = await userId('tatiana.lebedeva');
+  const next = await userId('ilya.ivanov');
+  const assign = (id: string, from: string, to: string) => call(`${C(env)}/users/${id}/assignments`,
+    { as: 'admin', body: { network_id: net.json.id, from, to } });
+  const old = await assign(first, '2020-01-01', '2020-01-19');
+  assert.equal(old.status, 201);
+  assert.equal((await call(`${C(env)}/assignments/${old.json.id}/end`, { as: 'admin', body: {} })).status, 200);
+  const overlap = await assign(next, '2020-01-19', '2020-01-25');
+  assert.equal(overlap.status, 409);
+  assert.match(overlap.json.error.message, /Татьяна Лебедева/);
+  assert.match(overlap.json.error.message, /после окончания/);
+  assert.equal((await assign(next, '2020-01-20', '2020-01-25')).status, 201);
 });
 
 test('нельзя оставить клиента без администратора', async () => {

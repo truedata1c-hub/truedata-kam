@@ -32,7 +32,6 @@ export interface Dir {
   users: Map<string, Approver>;
   managerOf: Map<string, string>;
   types: Map<string, string>; networks: Map<string, string>; groups: Map<string, string>; brands: Map<string, string>;
-  assigned: Map<string, Set<string>>; // сеть → закреплённые пользователи
 }
 
 export async function directory(q: Q, clientId: string): Promise<Dir> {
@@ -40,9 +39,9 @@ export async function directory(q: Q, clientId: string): Promise<Dir> {
     'select id, name, permissions, archived from kam.business_role where client_id=$1', [clientId])).rows
     .map((r) => [r.id, { name: r.name, approve: r.permissions.includes('APPROVE'), archived: r.archived }]));
   const { rows: ur } = await q.query<{ id: string; name: string; role_id: string | null }>(
-    `select u.id, u.display_name name, ur.role_id from kam.membership m join kam.app_user u on u.id = m.user_id and not u.disabled
-       left join kam.user_business_role ur on ur.client_id = m.client_id and ur.user_id = u.id
-      where m.client_id = $1 and m.active`, [clientId]);
+    `select u.id, u.display_name name, ur.role_id from kam.employee_profile u
+       left join kam.user_business_role ur on ur.client_id = u.client_id and ur.user_id = u.id
+      where u.client_id = $1 and u.active and not u.disabled`, [clientId]);
   const users = new Map<string, Approver>();
   for (const r of ur) {
     const u = users.get(r.id) ?? { id: r.id, name: r.name, roles: new Set<string>(), approve: false, scopes: new Set<string>() };
@@ -60,14 +59,8 @@ export async function directory(q: Q, clientId: string): Promise<Dir> {
   const managerOf = new Map((await q.query<{ user_id: string; manager_id: string }>(
     'select user_id, manager_id from kam.user_manager where client_id=$1 and valid @> current_date', [clientId])).rows.map((r) => [r.user_id, r.manager_id]));
   const named = async (sql: string) => new Map((await q.query<{ id: string; name: string }>(sql, [clientId])).rows.map((r) => [r.id, r.name]));
-  const assigned = new Map<string, Set<string>>();
-  for (const a of (await q.query<{ network_id: string; user_id: string }>(
-    'select network_id, user_id from kam.kam_assignment where client_id=$1 and valid @> current_date', [clientId])).rows) {
-    if (!assigned.has(a.network_id)) assigned.set(a.network_id, new Set());
-    assigned.get(a.network_id)!.add(a.user_id);
-  }
   return {
-    roles, users, managerOf, assigned,
+    roles, users, managerOf,
     types: await named('select id, name from kam.campaign_type where client_id=$1'),
     networks: await named('select id, name from kam.network where client_id=$1'),
     groups: await named('select id, name from kam.network_group where client_id=$1'),
@@ -171,7 +164,7 @@ function conditionText(c: Condition, d: Dir): string {
 
 // Вычисление маршрута -------------------------------------------------------------
 
-export interface RouteCampaign { id: string; owner_id: string; network_id: string; type_id: string; group_id: string | null; period_from: string; period_to: string }
+export interface RouteCampaign { id: string; owner_id: string | null; network_id: string; type_id: string; group_id: string | null; period_from: string; period_to: string }
 
 export interface ResolvedStep {
   position: number; title: string; assignee_rule: string; condition_text: string; deadline_days: number;
@@ -203,9 +196,9 @@ function evaluate(c: Condition, m: VersionMetrics | null, camp: RouteCampaign, d
 }
 
 /** Видит ли пользователь кампанию по своей роли (уточнение «с доступом к сети»). */
-export function canSee(u: Approver, camp: RouteCampaign, d: Dir): boolean {
+export function canSee(u: Approver, camp: Pick<RouteCampaign, 'owner_id'>, d: Dir): boolean {
   if (u.scopes.has('ALL') || u.scopes.has('BRANDS')) return true;
-  const net = d.assigned.get(camp.network_id) ?? new Set<string>();
+  if (!camp.owner_id) return false;
   const team = new Set<string>([u.id]);
   if (u.scopes.has('SUBORDINATES')) {
     let grew = true;
@@ -214,7 +207,7 @@ export function canSee(u: Approver, camp: RouteCampaign, d: Dir): boolean {
       for (const [sub, mgr] of d.managerOf) if (team.has(mgr) && !team.has(sub)) { team.add(sub); grew = true; }
     }
   }
-  return team.has(camp.owner_id) || [...team].some((x) => net.has(x));
+  return team.has(camp.owner_id);
 }
 
 export function resolveSteps(steps: StepDef[], camp: RouteCampaign, m: VersionMetrics | null, submitterId: string, d: Dir): ResolvedStep[] {
@@ -240,7 +233,7 @@ export function resolveSteps(steps: StepDef[], camp: RouteCampaign, m: VersionMe
     let error: string | null = null;
     const a = s.assignee;
     if (a.kind === 'MANAGER') {
-      const chain = chainOf(camp.owner_id);
+      const chain = camp.owner_id ? chainOf(camp.owner_id) : [];
       const target = chain[a.level - 1];
       if (!target) error = a.level === 1 ? 'У ответственного не указан руководитель.' : `У ответственного нет руководителя уровня ${a.level}.`;
       else {
@@ -299,7 +292,7 @@ export async function selectTemplate(q: Q, clientId: string, camp: Pick<RouteCam
 export async function routeCampaign(q: Q, clientId: string, campaignId: string): Promise<RouteCampaign> {
   const c = (await q.query<RouteCampaign>(
     `select c.id, c.owner_id, c.network_id, c.type_id, n.group_id, c.period_from::text period_from, c.period_to::text period_to
-       from kam.campaign c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2`, [clientId, campaignId])).rows[0];
+       from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id where c.client_id=$1 and c.id=$2`, [clientId, campaignId])).rows[0];
   if (!c) throw notFound();
   return c;
 }
@@ -421,10 +414,11 @@ export async function previewTemplate(ctx: Ctx, b: Record<string, unknown>) {
   requirePermission(ctx, 'ADMIN');
   if (!isUuid(b.campaign_id)) throw required('campaign_id', 'Выберите кампанию.');
   const vis = campaignVisibility(ctx, 3);
-  const c = (await ctx.db.query<{ owner_id: string; title: string; network: string }>(
-    `select c.owner_id, c.title, n.name network from kam.campaign c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
+  const c = (await ctx.db.query<{ owner_id: string | null; title: string; network: string }>(
+    `select c.owner_id, c.title, n.name network from kam.campaign_with_owner c join kam.network n on n.client_id = c.client_id and n.id = c.network_id
       where c.client_id=$1 and c.id=$2 and ${vis.sql}`, [ctx.clientId, b.campaign_id, ...vis.params])).rows[0];
   if (!c) throw notFound();
+  if (!c.owner_id) throw new ApiError(422, 'NETWORK_NOT_ASSIGNED', 'Сначала закрепите аптечную сеть за КАМом.');
   const v = (await ctx.db.query<{ id: string }>('select id from kam.offer_version where client_id=$1 and campaign_id=$2 order by number desc limit 1', [ctx.clientId, b.campaign_id])).rows[0];
   let template: (TemplateRow & { rule?: string }) | undefined;
   if (b.steps !== undefined) {

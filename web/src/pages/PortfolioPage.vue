@@ -10,25 +10,25 @@
 
     <!-- KPI в области видимости пользователя и выбранного года -->
     <div class="kpiGrid">
-      <button class="kpi" :class="{ selected: filters.stage === 'ACTIVE' && !filters.overdue }" @click="setStage('ACTIVE')">
-        <div class="kpiLabel">Активные кампании</div>
-        <div class="kpiValue">{{ kpi.active }}</div>
-        <div class="kpiSub">без отменённых и закрытых</div>
+      <button type="button" class="kpi" :aria-pressed="filters.stage === 'ACTIVE' && !filters.overdue" @click="setStage('ACTIVE')">
+        <span class="kpiLabel">Активные кампании</span>
+        <span class="kpiValue">{{ kpi.active }}</span>
+        <span class="kpiSub">без отменённых и закрытых</span>
       </button>
-      <button class="kpi" :class="{ selected: filters.stage === 'APPROVAL' }" @click="setStage('APPROVAL')">
-        <div class="kpiLabel">Ждут решения</div>
-        <div class="kpiValue">{{ kpi.awaiting_decision }}</div>
-        <div class="kpiSub">на внутреннем согласовании</div>
+      <button type="button" class="kpi" :aria-pressed="filters.stage === 'APPROVAL'" @click="setStage('APPROVAL')">
+        <span class="kpiLabel">Ждут решения</span>
+        <span class="kpiValue">{{ kpi.awaiting_decision }}</span>
+        <span class="kpiSub">на внутреннем согласовании</span>
       </button>
-      <div class="kpi">
-        <div class="kpiLabel">Согласованы</div>
-        <div class="kpiValue">{{ kpi.approved }}</div>
-        <div class="kpiSub">внутри, сетью или финально</div>
-      </div>
-      <button class="kpi" :class="{ selected: filters.overdue }" @click="toggleOverdue">
-        <div class="kpiLabel"><Icon id="alert-triangle" :size="13" />Просрочена контрольная дата</div>
-        <div class="kpiValue" :class="{ red: kpi.overdue > 0 }">{{ kpi.overdue }}</div>
-        <div class="kpiSub">условия не согласованы вовремя</div>
+      <button type="button" class="kpi" :aria-pressed="filters.stage === 'AGREED'" @click="setStage('AGREED')">
+        <span class="kpiLabel">Согласованы</span>
+        <span class="kpiValue">{{ kpi.approved }}</span>
+        <span class="kpiSub">внутри, сетью или финально</span>
+      </button>
+      <button type="button" class="kpi" :aria-pressed="filters.overdue" @click="toggleOverdue">
+        <span class="kpiLabel"><Icon id="alert-triangle" :size="13" />Просрочена контрольная дата</span>
+        <span class="kpiValue" :class="{ red: kpi.overdue > 0 }">{{ kpi.overdue }}</span>
+        <span class="kpiSub">условия не согласованы вовремя</span>
       </button>
       <div class="kpi">
         <div class="kpiLabel">План инвестиций</div>
@@ -56,7 +56,7 @@
         <template #prepend><Icon id="search-sm" :size="15" class="muted" /></template>
       </q-input>
       <TdSelect v-model="filters.year" :options="yearOptions" aria-label="Год" />
-      <TdSelect v-model="filters.stage" :options="stageOptions" aria-label="Этап" />
+      <TdSelect :model-value="filters.stage" :options="stageOptions" aria-label="Этап" @update:model-value="setStage(String($event ?? ''))" />
       <TdSelect v-model="filters.type" clearable :options="typeOptions" placeholder="Все типы" aria-label="Тип" />
       <TdSelect v-model="filters.network" clearable :options="networkOptions" placeholder="Все сети" aria-label="Сеть" />
       <TdSelect v-model="filters.brand" clearable :options="brandOptions" placeholder="Все бренды" aria-label="Бренд" />
@@ -142,6 +142,7 @@ const filters = reactive(readFilters());
 const rows = ref<Row[]>([]);
 const kpi = ref<Kpi>({ investment: 0, turnover: 0, roi: null, with_versions: 0, active: 0, overdue: 0, awaiting_decision: 0, approved: 0, by_stage: {} });
 const loading = ref(false);
+let latestRequest = 0;
 const createDlg = ref(false);
 const pagination = ref({ rowsPerPage: 50, page: 1 });
 
@@ -159,6 +160,7 @@ const yearOptions = [thisYear - 1, thisYear, thisYear + 1].map((y) => ({ label: 
 const stageOptions = [
   { label: 'Активные', value: 'ACTIVE' },
   { label: 'Все этапы', value: '' },
+  { label: 'Согласованы', value: 'AGREED' },
   ...STAGES.map((s) => ({ label: STAGE_LABEL[s], value: s })),
   { label: 'Отменённые', value: 'CANCELLED' },
   { label: 'Закрытые', value: 'CLOSED' },
@@ -184,17 +186,19 @@ function toggleOverdue() { filters.overdue = !filters.overdue; if (filters.overd
 function reset() { Object.assign(filters, defaults()); }
 
 async function load() {
+  const request = ++latestRequest;
   loading.value = true;
   try {
     const r = await api.get<{ items: Row[]; kpi: Kpi }>(`${base()}/campaigns`, {
       q: filters.q, year: filters.year, stage: filters.stage, type: filters.type, network: filters.network, owner: filters.owner, brand: filters.brand, overdue: filters.overdue ? '1' : undefined,
     });
+    if (request !== latestRequest) return;
     rows.value = r.items;
     kpi.value = r.kpi;
   } catch (e) {
-    $q.notify({ type: 'negative', message: (e as Error).message });
+    if (request === latestRequest) $q.notify({ type: 'negative', message: (e as Error).message });
   } finally {
-    loading.value = false;
+    if (request === latestRequest) loading.value = false;
   }
 }
 

@@ -17,7 +17,7 @@
     <div v-if="d?.brand_limited" class="banner info" style="margin-bottom: 12px"><Icon id="info-circle" :size="15" /><span>Вы видите подробно свои бренды; суммы по остальным брендам показаны одной строкой «Прочие бренды».</span></div>
 
     <template v-if="d">
-      <div class="kpiRow">
+      <div class="kpiGrid kpiRow">
         <div class="kpiTile">
           <div class="kLabel">План инвестиций</div>
           <div class="kValue">{{ fmtShort(d.kpi.investment) }}</div>

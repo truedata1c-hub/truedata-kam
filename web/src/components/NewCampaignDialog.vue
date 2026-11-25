@@ -11,13 +11,10 @@
       </div>
       <form class="dlgBody" @submit.prevent="save">
         <div class="formGrid">
-          <div v-if="ownerOptions.length > 1" class="full">
-            <label class="fieldLabel">Ответственный КАМ<span class="req">*</span></label>
-            <TdSelect v-model="form.owner_id" :options="ownerOptions" style="width: 100%" aria-label="Ответственный" @update:model-value="form.network_id = null" />
-          </div>
           <div>
             <label class="fieldLabel">Аптечная сеть<span class="req">*</span></label>
             <TdSelect v-model="form.network_id" :options="networkOptions" placeholder="Выберите сеть" style="width: 100%" aria-label="Сеть" :error="err.field === 'network_id'" />
+            <div v-if="owner" class="fieldHint">Ответственный КАМ — {{ owner.name }}</div>
           </div>
           <div>
             <label class="fieldLabel">Тип кампании<span class="req">*</span></label>
@@ -78,7 +75,6 @@ const emit = defineEmits<{ close: []; created: [r: { id: string; warnings: { mes
 const { err, busy, run } = useCommand();
 const assignable = computed(() => state.ref?.assignable ?? []);
 const form = reactive({
-  owner_id: assignable.value[0]?.id ?? null as string | null,
   network_id: null as string | null,
   type_id: null as string | null,
   title: '',
@@ -89,9 +85,9 @@ const form = reactive({
 const entities = ref<{ id: string; inn: string; name: string }[]>([]);
 const selected = ref<string[]>([]);
 
-const ownerOptions = computed(() => assignable.value.map((a) => ({ label: a.name, value: a.id })));
+const owner = computed(() => assignable.value.find((a) => form.network_id && a.network_ids.includes(form.network_id)));
 const networkOptions = computed(() => {
-  const ids = new Set(assignable.value.find((a) => a.id === form.owner_id)?.network_ids ?? []);
+  const ids = new Set(assignable.value.flatMap((a) => a.network_ids));
   return (state.ref?.networks ?? []).filter((n) => ids.has(n.id)).map((n) => ({ label: n.name, value: n.id }));
 });
 const typeOptions = computed(() => (state.ref?.types ?? []).map((t) => ({ label: t.name, value: t.id })));
@@ -101,7 +97,7 @@ const controlHint = computed(() => {
   const d = new Date(Date.parse(form.period_from + 'T00:00:00Z') - type.value.control_days * 86400_000).toISOString().slice(0, 10);
   return `Если не указать — ${fmtDate(d)} (за ${type.value.control_days} дн. до начала).`;
 });
-const ready = computed(() => form.owner_id && form.network_id && form.type_id && form.title.trim() && form.period_from && form.period_to && selected.value.length);
+const ready = computed(() => owner.value && form.network_id && form.type_id && form.title.trim() && form.period_from && form.period_to && selected.value.length);
 
 // Подсказка периода и названия по типу: годовые — следующий календарный год, акция — следующий месяц.
 function onType() {
@@ -128,6 +124,7 @@ watch(() => form.network_id, async (id) => {
   selected.value = [];
   if (!id) return;
   const r = await api.get<{ items: { id: string; inn: string; name: string }[] }>(`${base()}/reference/networks/${id}/legal-entities`);
+  if (form.network_id !== id) return;
   entities.value = r.items;
   selected.value = r.items.map((e) => e.id);
 });
@@ -135,7 +132,7 @@ watch(() => form.network_id, async (id) => {
 async function save() {
   if (!ready.value) return;
   const r = await run(() => api.post<{ id: string; warnings: { message: string }[] }>(`${base()}/campaigns`, {
-    owner_id: form.owner_id, network_id: form.network_id, type_id: form.type_id, title: form.title,
+    owner_id: owner.value?.id, network_id: form.network_id, type_id: form.type_id, title: form.title,
     period_from: form.period_from, period_to: form.period_to, control_date: form.control_date || null, legal_entity_ids: selected.value,
   }));
   if (r) emit('created', r.data);
